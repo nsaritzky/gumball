@@ -69,10 +69,6 @@ impl Mmu {
         mmu
     }
 
-    pub fn get(&mut self, address: u16) -> Option<u8> {
-        self.memory.get(address as usize).copied()
-    }
-
     fn load_rom(&mut self, path: &str) -> std::io::Result<Vec<u8>> {
         let mut file = File::open(path)?;
         let mut buffer = Vec::new();
@@ -84,14 +80,23 @@ impl Mmu {
         self.memory[0x0000..0x8000].copy_from_slice(&rom[0..0x8000]);
     }
 
-    pub fn w(&mut self, address: u16, value: u8) {
+    fn switch_rom_bank(&mut self, bank: u8) {
+        let bank = bank & 0x1F;
+        let bank = if bank == 0 { 1usize } else { bank as usize };
+        let offset = bank * 0x4000;
+        let temp = self.memory[offset..offset + 0x4000].to_vec();
+        self.memory[0x4000..0x8000].copy_from_slice(&temp);
+    }
+
+    pub fn set(&mut self, address: u16, value: u8) {
         match address {
+            0x2000..=0x3FFF => self.switch_rom_bank(value),
             0xFF04 => self.memory[address as usize] = 0,
             address => self.memory[address as usize] = value,
         }
     }
 
-    pub fn r(&self, address: usize) -> u8 {
+    pub fn get(&self, address: usize) -> u8 {
         self.memory[address]
     }
 
