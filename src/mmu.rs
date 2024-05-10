@@ -4,12 +4,14 @@ use std::ops::{Index, IndexMut};
 
 pub struct Mmu {
     memory: [u8; 0x10000],
+    total_rom: Vec<u8>,
 }
 
 impl Mmu {
     pub fn new() -> Self {
         Mmu {
             memory: [0u8; 0x10000],
+            total_rom: Vec::new(),
         }
     }
 
@@ -77,14 +79,15 @@ impl Mmu {
     }
 
     pub fn initialize_memory(&mut self, rom: Vec<u8>) {
-        self.memory[0x0000..0x8000].copy_from_slice(&rom[0..0x8000]);
+        self.memory[0x0000..0x4000].copy_from_slice(&rom[0..0x4000]);
+        self.total_rom = rom;
     }
 
     fn switch_rom_bank(&mut self, bank: u8) {
         let bank = bank & 0x1F;
         let bank = if bank == 0 { 1usize } else { bank as usize };
         let offset = bank * 0x4000;
-        let temp = self.memory[offset..offset + 0x4000].to_vec();
+        let temp = self.total_rom[offset..offset + 0x4000].to_vec();
         self.memory[0x4000..0x8000].copy_from_slice(&temp);
     }
 

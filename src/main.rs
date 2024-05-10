@@ -1,5 +1,6 @@
 mod cpu;
 mod mmu;
+mod ppu;
 
 use clap::Parser;
 

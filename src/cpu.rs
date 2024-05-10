@@ -1,3 +1,4 @@
+use std::ops::BitAnd;
 use std::time::{Duration, Instant};
 use std::usize;
 
@@ -134,7 +135,9 @@ struct Cpu {
     pc: usize,
     sp: usize,
     ime: bool,
+    ime_delay: bool,
     halted: bool,
+    stopped: bool,
     clock_cycles: usize,
 }
 
@@ -151,7 +154,9 @@ impl Default for Cpu {
             pc: 0x0100,
             sp: 0xFFFE,
             ime: false,
+            ime_delay: false,
             halted: false,
+            stopped: false,
             clock_cycles: 0,
         }
     }
@@ -164,6 +169,98 @@ impl Cpu {
         let b5 = if self.flags.h { 1 } else { 0 };
         let b4 = if self.flags.c { 1 } else { 0 };
         b7 << 7 | b6 << 6 | b5 << 5 | b4 << 4
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Interrupt {
+    VBlank,
+    LcdStat,
+    Timer,
+    Serial,
+    Joypad,
+}
+
+fn get_interrupts(byte: u8) -> Vec<Interrupt> {
+    let mut interrupts = Vec::new();
+    if byte & 0b00001 != 0 {
+        interrupts.push(Interrupt::VBlank);
+    }
+    if byte & 0b00010 != 0 {
+        interrupts.push(Interrupt::LcdStat);
+    }
+    if byte & 0b00100 != 0 {
+        interrupts.push(Interrupt::Timer);
+    }
+    if byte & 0b01000 != 0 {
+        interrupts.push(Interrupt::Serial);
+    }
+    if byte & 0b10000 != 0 {
+        interrupts.push(Interrupt::Joypad);
+    }
+    interrupts
+}
+
+impl BitAnd<u8> for Interrupt {
+    type Output = bool;
+
+    fn bitand(self, rhs: u8) -> bool {
+        match self {
+            Interrupt::VBlank => rhs & 0b00001 != 0,
+            Interrupt::LcdStat => rhs & 0b00010 != 0,
+            Interrupt::Timer => rhs & 0b00100 != 0,
+            Interrupt::Serial => rhs & 0b01000 != 0,
+            Interrupt::Joypad => rhs & 0b10000 != 0,
+        }
+    }
+}
+
+impl Interrupt {
+    fn priority(&self) -> u8 {
+        match self {
+            Interrupt::VBlank => 0,
+            Interrupt::LcdStat => 1,
+            Interrupt::Timer => 2,
+            Interrupt::Serial => 3,
+            Interrupt::Joypad => 4,
+        }
+    }
+
+    fn address(&self) -> u16 {
+        match self {
+            Interrupt::VBlank => 0x40,
+            Interrupt::LcdStat => 0x48,
+            Interrupt::Timer => 0x50,
+            Interrupt::Serial => 0x58,
+            Interrupt::Joypad => 0x60,
+        }
+    }
+
+    fn enabled(&self, mem: &Mmu) -> bool {
+        let ie = mem.get(0xFFFF) & (1 << self.priority()) != 0;
+        let if_ = mem.get(0xFF0F) & (1 << self.priority()) != 0;
+        ie && if_
+    }
+
+    fn clear(&self, mem: &mut Mmu) {
+        let mut if_ = mem.get(0xFF0F);
+        if_ &= !(1 << self.priority());
+        mem.set(0xFF0F, if_);
+    }
+
+    fn trigger(&self, mem: &mut Mmu) {
+        let mut if_ = mem.get(0xFF0F);
+        if_ |= 1 << self.priority();
+        mem.set(0xFF0F, if_);
+    }
+
+    fn handle(&self, state: &mut Cpu, mem: &mut Mmu) {
+        self.clear(mem);
+        state.ime = false;
+        state.sp -= 2;
+        mem.set(state.sp as u16, (state.pc & 0xFF) as u8);
+        mem.set(state.sp as u16 + 1, (state.pc >> 8) as u8);
+        state.pc = self.address() as usize;
     }
 }
 
@@ -389,6 +486,7 @@ fn inc_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) {
         R8::HLMem => {
             result = mem[cpu.registers.get_hl() as usize].wrapping_add(1);
             mem[cpu.registers.get_hl() as usize] = result;
+            cpu.clock_cycles += 2;
         }
         R8::A => {
             result = cpu.registers.a.wrapping_add(1);
@@ -430,6 +528,7 @@ fn dec_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) {
         R8::HLMem => {
             result = mem[cpu.registers.get_hl() as usize].wrapping_sub(1);
             mem[cpu.registers.get_hl() as usize] = result;
+            cpu.clock_cycles += 2;
         }
         R8::A => {
             result = cpu.registers.a.wrapping_sub(1);
@@ -462,6 +561,7 @@ fn ld_r8_imm(state: &mut Cpu, mem: &mut Mmu, opcode: u8, val: u8) {
             state.registers.l = val;
         }
         R8::HLMem => {
+            state.clock_cycles += 1;
             mem.set(state.registers.get_hl(), val);
         }
         R8::A => {
@@ -584,7 +684,7 @@ fn jp_cond(state: &mut Cpu, mem: &Mmu, opcode: u8) {
     }
 }
 
-fn get_register_value(state: &Cpu, mem: &Mmu, register: R8) -> u8 {
+fn get_register_value(state: &mut Cpu, mem: &Mmu, register: R8) -> u8 {
     match register {
         R8::B => state.registers.b,
         R8::C => state.registers.c,
@@ -592,7 +692,10 @@ fn get_register_value(state: &Cpu, mem: &Mmu, register: R8) -> u8 {
         R8::E => state.registers.e,
         R8::H => state.registers.h,
         R8::L => state.registers.l,
-        R8::HLMem => mem.get(state.registers.get_hl() as usize),
+        R8::HLMem => {
+            state.clock_cycles += 1;
+            mem.get(state.registers.get_hl() as usize)
+        }
         R8::A => state.registers.a,
     }
 }
@@ -605,15 +708,16 @@ fn set_register_value(state: &mut Cpu, mem: &mut Mmu, register: R8, value: u8) {
         R8::E => state.registers.e = value,
         R8::H => state.registers.h = value,
         R8::L => state.registers.l = value,
-        R8::HLMem => mem.set(state.registers.get_hl(), value),
+        R8::HLMem => {
+            mem.set(state.registers.get_hl(), value);
+            state.clock_cycles += 1;
+        }
         R8::A => state.registers.a = value,
     }
 }
 
 fn halt(state: &mut Cpu, _mem: &mut Mmu) {
-    if state.ime {
-        state.halted = true;
-    }
+    state.halted = true;
 }
 
 fn ld_r8_r8(state: &mut Cpu, mem: &mut Mmu, opcode: u8) {
@@ -1333,7 +1437,7 @@ fn execute(state: &mut Cpu, mem: &mut Mmu) {
             let addr = (mem.get(state.pc + 2) as u16) << 8 | mem.get(state.pc + 1) as u16;
             mem.set(addr, state.registers.a);
 
-            state.clock_cycles += 2;
+            state.clock_cycles += 4;
             state.pc += 3;
         }
         // LDH A, [C]
@@ -1369,13 +1473,13 @@ fn execute(state: &mut Cpu, mem: &mut Mmu) {
             state.flags.h = if diff >= 0 {
                 (prev & 0xF) + ((diff as u16) & 0xF) > 0xF
             } else {
-                // ((prev as usize) & 0x0F) < ((-diff) as usize & 0x0F)
-                ((prev & 0x0F).wrapping_sub(diff as u16 & 0x0F)) & 0x10 != 0
+                ((prev as usize) & 0x0F) >= ((-diff) as usize & 0x0F)
+                // ((prev & 0x0F).wrapping_sub(diff as u16 & 0x0F)) & 0x10 != 0
             };
             state.flags.c = if diff >= 0 {
                 (prev & 0xFF) + ((diff as u16) & 0xFF) > 0xFF
             } else {
-                ((prev as usize) & 0xFF) < (((-diff) as usize) & 0xFF)
+                ((prev as usize) & 0xFF) >= (((-diff) as usize) & 0xFF)
             };
             // if diff == -1 {
             //     println!(
@@ -1400,13 +1504,13 @@ fn execute(state: &mut Cpu, mem: &mut Mmu) {
             state.flags.h = if diff >= 0 {
                 (prev & 0xF) + ((diff as usize) & 0xF) > 0xF
             } else {
-                // ((prev as usize) & 0x0F) < ((-diff) as usize & 0x0F)
-                ((prev & 0x0F).wrapping_sub(diff as usize & 0x0F)) & 0x10 != 0
+                ((prev as usize) & 0x0F) >= ((-diff) as usize & 0x0F)
+                // ((prev & 0x0F).wrapping_sub(diff as usize & 0x0F)) & 0x10 != 0
             };
             state.flags.c = if diff >= 0 {
                 (prev & 0xFF) + ((diff as usize) & 0xFF) > 0xFF
             } else {
-                ((prev as usize) & 0xFF) < (((-diff) as usize) & 0xFF)
+                ((prev as usize) & 0xFF) >= (((-diff) as usize) & 0xFF)
             };
 
             state.clock_cycles += 3;
@@ -1428,7 +1532,7 @@ fn execute(state: &mut Cpu, mem: &mut Mmu) {
         }
         // EI
         0xFB => {
-            state.ime = true;
+            state.ime_delay = true;
 
             state.clock_cycles += 1;
             state.pc += 1;
@@ -1622,14 +1726,28 @@ pub fn emulate(mem: &mut Mmu) {
     let mut total_cycles = 0u64;
     let mut timer_cycle_count = 0;
     loop {
-        execute(&mut state, mem);
+        for interrupt in get_interrupts(mem[0xFF0F]) {
+            state.halted = false;
+            if state.ime && interrupt.enabled(mem) {
+                interrupt.handle(&mut state, mem);
+            }
+        }
+        // println!("A: {:02X} F: {:02X} B: {:02X} C: {:02X} D: {:02X} E: {:02X} H: {:02X} L: {:02X} SP: {:04X} PC: 00:{:04X} ({:02X} {:02X} {:02X} {:02X})", state.registers.a, state.get_f_register(), state.registers.b, state.registers.c, state.registers.d, state.registers.e, state.registers.h, state.registers.l, state.sp, state.pc, mem[state.pc], mem[state.pc + 1], mem[state.pc + 2], mem[state.pc + 3]);
+
+        if !state.stopped && !state.halted {
+            execute(&mut state, mem);
+        } else {
+            state.clock_cycles += 1;
+        }
 
         let time_elapsed = now.elapsed();
+        now = Instant::now();
         let cycles_elapsed = state.clock_cycles as u64 - total_cycles;
-        if time_elapsed > Duration::from_nanos(cycles_elapsed * 1_000_000_000 / CLOCK_SPEED) {
+        if Duration::from_nanos(cycles_elapsed * 1_000_000_000 / CLOCK_SPEED) > time_elapsed {
             ::std::thread::sleep(Duration::from_nanos(
-                time_elapsed.as_nanos() as u64 - cycles_elapsed * 1_000_000_000 / CLOCK_SPEED,
+                cycles_elapsed * 1_000_000_000 / CLOCK_SPEED - time_elapsed.as_nanos() as u64,
             ));
+        } else {
         }
         if time_elapsed > Duration::from_nanos(1_000_000_000 / DIV_RATE) {
             mem.inc_div();
@@ -1647,12 +1765,17 @@ pub fn emulate(mem: &mut Mmu) {
 
         if timer_enable {
             timer_cycle_count += cycles_elapsed;
-            if timer_cycle_count >= timer_cycles {
-                let (incremented, overflow) = mem[0xFF05].overflowing_add(1);
-                mem.set(0xFF05, if overflow { mem[0xFF06] } else { incremented });
+            while timer_cycle_count >= timer_cycles {
+                timer_cycle_count -= timer_cycles;
+                let (incremented, overflowed) = mem.get(0xFF05).overflowing_add(1);
+                if overflowed {
+                    mem.set(0xFF05, mem[0xFF06]);
+                    Interrupt::Timer.trigger(mem);
+                } else {
+                    mem.set(0xFF05, incremented);
+                }
             }
         }
-        now = Instant::now();
         total_cycles = state.clock_cycles as u64;
 
         if mem[0xFF01] != 0 {
@@ -1660,7 +1783,10 @@ pub fn emulate(mem: &mut Mmu) {
             mem[0xFF01] = 0;
         }
 
-        // println!("A: {:02X} F: {:02X} B: {:02X} C: {:02X} D: {:02X} E: {:02X} H: {:02X} L: {:02X} SP: {:04X} PC: 00:{:04X} ({:02X} {:02X} {:02X} {:02X})", state.registers.a, state.get_f_register(), state.registers.b, state.registers.c, state.registers.d, state.registers.e, state.registers.h, state.registers.l, state.sp, state.pc, mem[state.pc], mem[state.pc + 1], mem[state.pc + 2], mem[state.pc + 3])
+        if state.ime_delay {
+            state.ime = true;
+            state.ime_delay = false;
+        }
     }
 }
 
