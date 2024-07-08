@@ -1,0 +1,13 @@
+pub const DIV: usize = 0xFF04;
+pub const NR52: usize = 0xFF26;
+pub const LCDC: usize = 0xFF40;
+pub const SCY: usize = 0xFF42;
+pub const SCX: usize = 0xFF43;
+pub const LY: usize = 0xFF44;
+pub const LYC: usize = 0xFF45;
+pub const STAT: usize = 0xFF41;
+pub const WY: usize = 0xFF4A;
+pub const WX: usize = 0xFF4B;
+pub const OBP0: usize = 0xFF48;
+pub const OBP1: usize = 0xFF49;
+pub const BGP: usize = 0xFF47;

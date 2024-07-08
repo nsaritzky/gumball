@@ -9,6 +9,11 @@ default-run = "gumball"
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
 
+[dependencies.sdl2]
+version = "0.36.0"
+default-features = false
+features = ["mixer"]
+
 [[bin]]
 name = "disassembler"
 path = "src/disassembler/main.rs"

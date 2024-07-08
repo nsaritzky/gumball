@@ -1,7 +1,6 @@
-use std::ops::BitAnd;
-use std::time::{Duration, Instant};
 use std::usize;
 
+use crate::interrupts::{get_interrupts, Interrupt};
 use crate::mmu::Mmu;
 
 const CLOCK_SPEED: u64 = 1_050_000;
@@ -129,15 +128,15 @@ impl Registers {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Cpu {
+pub struct Cpu {
     registers: Registers,
     flags: Flags,
     pc: usize,
     sp: usize,
     ime: bool,
     ime_delay: bool,
-    halted: bool,
-    stopped: bool,
+    pub halted: bool,
+    pub stopped: bool,
     clock_cycles: usize,
 }
 
@@ -159,108 +158,6 @@ impl Default for Cpu {
             stopped: false,
             clock_cycles: 0,
         }
-    }
-}
-
-impl Cpu {
-    fn get_f_register(&self) -> u8 {
-        let b7 = if self.flags.z { 1 } else { 0 };
-        let b6 = if self.flags.n { 1 } else { 0 };
-        let b5 = if self.flags.h { 1 } else { 0 };
-        let b4 = if self.flags.c { 1 } else { 0 };
-        b7 << 7 | b6 << 6 | b5 << 5 | b4 << 4
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Interrupt {
-    VBlank,
-    LcdStat,
-    Timer,
-    Serial,
-    Joypad,
-}
-
-fn get_interrupts(byte: u8) -> Vec<Interrupt> {
-    let mut interrupts = Vec::new();
-    if byte & 0b00001 != 0 {
-        interrupts.push(Interrupt::VBlank);
-    }
-    if byte & 0b00010 != 0 {
-        interrupts.push(Interrupt::LcdStat);
-    }
-    if byte & 0b00100 != 0 {
-        interrupts.push(Interrupt::Timer);
-    }
-    if byte & 0b01000 != 0 {
-        interrupts.push(Interrupt::Serial);
-    }
-    if byte & 0b10000 != 0 {
-        interrupts.push(Interrupt::Joypad);
-    }
-    interrupts
-}
-
-impl BitAnd<u8> for Interrupt {
-    type Output = bool;
-
-    fn bitand(self, rhs: u8) -> bool {
-        match self {
-            Interrupt::VBlank => rhs & 0b00001 != 0,
-            Interrupt::LcdStat => rhs & 0b00010 != 0,
-            Interrupt::Timer => rhs & 0b00100 != 0,
-            Interrupt::Serial => rhs & 0b01000 != 0,
-            Interrupt::Joypad => rhs & 0b10000 != 0,
-        }
-    }
-}
-
-impl Interrupt {
-    fn priority(&self) -> u8 {
-        match self {
-            Interrupt::VBlank => 0,
-            Interrupt::LcdStat => 1,
-            Interrupt::Timer => 2,
-            Interrupt::Serial => 3,
-            Interrupt::Joypad => 4,
-        }
-    }
-
-    fn address(&self) -> u16 {
-        match self {
-            Interrupt::VBlank => 0x40,
-            Interrupt::LcdStat => 0x48,
-            Interrupt::Timer => 0x50,
-            Interrupt::Serial => 0x58,
-            Interrupt::Joypad => 0x60,
-        }
-    }
-
-    fn enabled(&self, mem: &Mmu) -> bool {
-        let ie = mem.get(0xFFFF) & (1 << self.priority()) != 0;
-        let if_ = mem.get(0xFF0F) & (1 << self.priority()) != 0;
-        ie && if_
-    }
-
-    fn clear(&self, mem: &mut Mmu) {
-        let mut if_ = mem.get(0xFF0F);
-        if_ &= !(1 << self.priority());
-        mem.set(0xFF0F, if_);
-    }
-
-    fn trigger(&self, mem: &mut Mmu) {
-        let mut if_ = mem.get(0xFF0F);
-        if_ |= 1 << self.priority();
-        mem.set(0xFF0F, if_);
-    }
-
-    fn handle(&self, state: &mut Cpu, mem: &mut Mmu) {
-        self.clear(mem);
-        state.ime = false;
-        state.sp -= 2;
-        mem.set(state.sp as u16, (state.pc & 0xFF) as u8);
-        mem.set(state.sp as u16 + 1, (state.pc >> 8) as u8);
-        state.pc = self.address() as usize;
     }
 }
 
@@ -456,8 +353,9 @@ fn dec_r16(cpu: &mut Cpu, opcode: u8) {
     }
 }
 
-fn inc_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) {
+fn inc_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) -> u64 {
     let result;
+    let mut cycles = 1;
     match r8((opcode & 0b00111000) >> 3) {
         R8::B => {
             result = cpu.registers.b.wrapping_add(1);
@@ -486,7 +384,7 @@ fn inc_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) {
         R8::HLMem => {
             result = mem[cpu.registers.get_hl() as usize].wrapping_add(1);
             mem[cpu.registers.get_hl() as usize] = result;
-            cpu.clock_cycles += 2;
+            cycles += 2;
         }
         R8::A => {
             result = cpu.registers.a.wrapping_add(1);
@@ -496,10 +394,12 @@ fn inc_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) {
     cpu.flags.z = result == 0;
     cpu.flags.n = false;
     cpu.flags.h = result & 0xF == 0;
+    cycles
 }
 
-fn dec_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) {
+fn dec_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) -> u64 {
     let result;
+    let mut cycles = 1;
     match r8((opcode & 0b00111000) >> 3) {
         R8::B => {
             result = cpu.registers.b.wrapping_sub(1);
@@ -527,8 +427,8 @@ fn dec_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) {
         }
         R8::HLMem => {
             result = mem[cpu.registers.get_hl() as usize].wrapping_sub(1);
-            mem[cpu.registers.get_hl() as usize] = result;
-            cpu.clock_cycles += 2;
+            mem.set(cpu.registers.get_hl(), result);
+            cycles += 2;
         }
         R8::A => {
             result = cpu.registers.a.wrapping_sub(1);
@@ -538,9 +438,11 @@ fn dec_r8(cpu: &mut Cpu, mem: &mut Mmu, opcode: u8) {
     cpu.flags.z = result == 0;
     cpu.flags.n = true;
     cpu.flags.h = result & 0xF == 0xF;
+    cycles
 }
 
-fn ld_r8_imm(state: &mut Cpu, mem: &mut Mmu, opcode: u8, val: u8) {
+fn ld_r8_imm(state: &mut Cpu, mem: &mut Mmu, opcode: u8, val: u8) -> u64 {
+    let mut cycles = 2;
     match r8((opcode & 0b00111000) >> 3) {
         R8::B => {
             state.registers.b = val;
@@ -561,13 +463,14 @@ fn ld_r8_imm(state: &mut Cpu, mem: &mut Mmu, opcode: u8, val: u8) {
             state.registers.l = val;
         }
         R8::HLMem => {
-            state.clock_cycles += 1;
+            cycles += 1;
             mem.set(state.registers.get_hl(), val);
         }
         R8::A => {
             state.registers.a = val;
         }
     }
+    cycles
 }
 
 fn rotate_left(state: &mut Cpu, through_carry_flag: bool, val: u8) -> u8 {
@@ -602,83 +505,83 @@ fn jp(state: &mut Cpu, mem: &Mmu) {
     state.pc = u16::from_le_bytes([mem.get(state.pc + 1), mem.get(state.pc + 2)]).into();
 }
 
-fn jr_cond(state: &mut Cpu, mem: &Mmu, opcode: u8) {
+fn jr_cond(state: &mut Cpu, mem: &Mmu, opcode: u8) -> u64 {
     match cond((0b00011000 & opcode) >> 3) {
         Cond::NZ => {
             if !state.flags.z {
-                state.clock_cycles += 3;
                 jr(state, mem);
+                3
             } else {
-                state.clock_cycles += 2;
                 state.pc += 2;
+                2
             }
         }
         Cond::Z => {
             if state.flags.z {
-                state.clock_cycles += 3;
                 jr(state, mem);
+                3
             } else {
-                state.clock_cycles += 2;
                 state.pc += 2;
+                2
             }
         }
         Cond::NC => {
             if !state.flags.c {
-                state.clock_cycles += 3;
                 jr(state, mem);
+                3
             } else {
-                state.clock_cycles += 2;
                 state.pc += 2;
+                2
             }
         }
         Cond::C => {
             if state.flags.c {
-                state.clock_cycles += 3;
                 jr(state, mem);
+                3
             } else {
-                state.clock_cycles += 2;
                 state.pc += 2;
+                2
             }
         }
     }
 }
 
-fn jp_cond(state: &mut Cpu, mem: &Mmu, opcode: u8) {
+fn jp_cond(state: &mut Cpu, mem: &Mmu, opcode: u8) -> u64 {
     match cond((0b00011000 & opcode) >> 3) {
         Cond::NZ => {
             if !state.flags.z {
-                state.clock_cycles += 4;
                 jp(state, mem);
+                4
             } else {
-                state.clock_cycles += 3;
                 state.pc += 3;
+                3
             }
         }
         Cond::Z => {
             if state.flags.z {
-                state.clock_cycles += 4;
                 jp(state, mem);
+                4
             } else {
-                state.clock_cycles += 3;
                 state.pc += 3;
+                3
             }
         }
         Cond::NC => {
             if !state.flags.c {
-                state.clock_cycles += 4;
                 jp(state, mem);
+                4
             } else {
-                state.clock_cycles += 3;
                 state.pc += 3;
+                3
             }
         }
         Cond::C => {
             if state.flags.c {
-                state.clock_cycles += 4;
                 jp(state, mem);
+                4
             } else {
-                state.clock_cycles += 3;
                 state.pc += 3;
+                3
             }
         }
     }
@@ -716,11 +619,12 @@ fn set_register_value(state: &mut Cpu, mem: &mut Mmu, register: R8, value: u8) {
     }
 }
 
-fn halt(state: &mut Cpu, _mem: &mut Mmu) {
+fn halt(state: &mut Cpu, _mem: &mut Mmu) -> u64 {
     state.halted = true;
+    1
 }
 
-fn ld_r8_r8(state: &mut Cpu, mem: &mut Mmu, opcode: u8) {
+fn ld_r8_r8(state: &mut Cpu, mem: &mut Mmu, opcode: u8) -> u64 {
     let dest = r8((opcode & 0b00111000) >> 3);
     let src = r8(opcode & 0b00000111);
     if src == R8::HLMem && dest == R8::HLMem {
@@ -728,13 +632,22 @@ fn ld_r8_r8(state: &mut Cpu, mem: &mut Mmu, opcode: u8) {
     }
     let src_value = get_register_value(state, mem, src);
     set_register_value(state, mem, dest, src_value);
+    if src == R8::HLMem || dest == R8::HLMem {
+        2
+    } else {
+        1
+    }
 }
 
 type Binop = fn(&mut Cpu, val: u8) -> Flags;
 
-fn operate(state: &mut Cpu, mem: &mut Mmu, opcode: u8, operator: Binop) -> Flags {
-    let val = get_register_value(state, mem, r8(0b00000111 & opcode));
-    operator(state, val)
+fn operate(state: &mut Cpu, mem: &mut Mmu, opcode: u8, operator: Binop) -> (Flags, u64) {
+    let operand = r8(opcode & 0b00000111);
+    let val = get_register_value(state, mem, operand);
+    (
+        operator(state, val),
+        if operand == R8::HLMem { 2 } else { 1 },
+    )
 }
 
 fn operate_imm(state: &mut Cpu, mem: &Mmu, operator: Binop) -> Flags {
@@ -838,42 +751,42 @@ fn ret(state: &mut Cpu, mem: &mut Mmu) {
     state.sp += 2;
 }
 
-fn ret_cond(state: &mut Cpu, mem: &mut Mmu, opcode: u8) {
+fn ret_cond(state: &mut Cpu, mem: &mut Mmu, opcode: u8) -> u64 {
     match cond((opcode & 0b00011000) >> 3) {
         Cond::NZ => {
             if !state.flags.z {
                 ret(state, mem);
-                state.clock_cycles += 5;
+                5
             } else {
                 state.pc += 1;
-                state.clock_cycles += 2;
+                2
             }
         }
         Cond::Z => {
             if state.flags.z {
                 ret(state, mem);
-                state.clock_cycles += 5;
+                5
             } else {
                 state.pc += 1;
-                state.clock_cycles += 2;
+                2
             }
         }
         Cond::NC => {
             if !state.flags.c {
                 ret(state, mem);
-                state.clock_cycles += 5;
+                5
             } else {
                 state.pc += 1;
-                state.clock_cycles += 2;
+                2
             }
         }
         Cond::C => {
             if state.flags.c {
                 ret(state, mem);
-                state.clock_cycles += 5;
+                5
             } else {
                 state.pc += 1;
-                state.clock_cycles += 2;
+                2
             }
         }
     }
@@ -889,38 +802,42 @@ fn call(state: &mut Cpu, mem: &mut Mmu) {
     state.clock_cycles += 6;
 }
 
-fn call_cond(state: &mut Cpu, mem: &mut Mmu, opcode: u8) {
+fn call_cond(state: &mut Cpu, mem: &mut Mmu, opcode: u8) -> u64 {
     match cond((0b00011000 & opcode) >> 3) {
         Cond::NZ => {
             if !state.flags.z {
-                call(state, mem)
+                call(state, mem);
+                6
             } else {
-                state.clock_cycles += 3;
                 state.pc += 3;
+                3
             }
         }
         Cond::Z => {
             if state.flags.z {
-                call(state, mem)
+                call(state, mem);
+                6
             } else {
-                state.clock_cycles += 3;
                 state.pc += 3;
+                3
             }
         }
         Cond::NC => {
             if !state.flags.c {
-                call(state, mem)
+                call(state, mem);
+                6
             } else {
-                state.clock_cycles += 3;
                 state.pc += 3;
+                3
             }
         }
         Cond::C => {
             if state.flags.c {
-                call(state, mem)
+                call(state, mem);
+                6
             } else {
-                state.clock_cycles += 3;
                 state.pc += 3;
+                3
             }
         }
     }
@@ -996,555 +913,579 @@ fn push_r16stk(state: &mut Cpu, mem: &mut Mmu, opcode: u8) {
     }
 }
 
-fn execute(state: &mut Cpu, mem: &mut Mmu) {
-    let opcode = mem.get(state.pc);
-    match opcode {
-        // NOP
-        0x00 => {
-            state.clock_cycles += 1;
-            state.pc += 1;
+impl Cpu {
+    pub fn new() -> Self {
+        Cpu {
+            registers: Registers::default(),
+            flags: Flags::default(),
+            pc: 0x0100,
+            sp: 0xFFFE,
+            ime: false,
+            ime_delay: false,
+            halted: false,
+            stopped: false,
+            clock_cycles: 0,
         }
-        // ld r16, imm16
-        op if 0b11001111 & op == 0b00000001 => {
-            let register_pair = r16((op & 0b00110000) >> 4);
-            let imm16 = u16::from_le_bytes([mem.get(state.pc + 1), mem.get(state.pc + 2)]);
-            ld_r16(register_pair, state, imm16);
+    }
 
-            state.clock_cycles += 3;
-            state.pc += 3;
-        }
-        // ld [r16mem], a
-        op if 0b11001111 & op == 0b00000010 => {
-            ld_r16_mem_a(r16_mem((op & 0b00110000) >> 4), state, mem);
+    fn get_f_register(&self) -> u8 {
+        let b7 = if self.flags.z { 1 } else { 0 };
+        let b6 = if self.flags.n { 1 } else { 0 };
+        let b5 = if self.flags.h { 1 } else { 0 };
+        let b4 = if self.flags.c { 1 } else { 0 };
+        b7 << 7 | b6 << 6 | b5 << 5 | b4 << 4
+    }
 
-            state.clock_cycles += 2;
-            state.pc += 1
+    pub fn enable_ime_delayed(&mut self) {
+        if self.ime_delay {
+            self.ime = true;
+            self.ime_delay = false;
         }
-        // ld a, [r16mem]
-        op if 0b11001111 & op == 0b00001010 => {
-            ld_a_r16_mem(r16_mem((op & 0b00110000) >> 4), state, mem);
+    }
 
-            state.clock_cycles += 2;
-            state.pc += 1;
-        }
-        // ld [imm16], sp
-        0x08 => {
-            ld_imm16_sp(
-                state,
-                mem,
-                u16::from_le_bytes([mem.get(state.pc + 1), mem.get(state.pc + 2)]),
-            );
-
-            state.clock_cycles += 5;
-            state.pc += 3;
-        }
-        // inc r16
-        op if 0b11001111 & op == 0b00000011 => {
-            inc_r16(state, op);
-
-            state.clock_cycles += 2;
-            state.pc += 1;
-        }
-        // dec r16
-        op if 0b11001111 & op == 0b00001011 => {
-            dec_r16(state, op);
-
-            state.clock_cycles += 2;
-            state.pc += 1;
-        }
-        // add hl, r16
-        op if 0b11001111 & op == 0b00001001 => {
-            let operand = r16((op & 0b00110000) >> 4);
-            match operand {
-                R16::BC => {
-                    let (h, l, cflag, hflag) = add_8_8(
-                        state.registers.b,
-                        state.registers.c,
-                        state.registers.get_hl(),
-                    );
-                    state.registers.set_hl(u16::from(h) << 8 | u16::from(l));
-                    state.flags.n = false;
-                    state.flags.c = cflag;
-                    state.flags.h = hflag;
-                }
-                R16::DE => {
-                    let (h, l, cflag, hflag) = add_8_8(
-                        state.registers.d,
-                        state.registers.e,
-                        state.registers.get_hl(),
-                    );
-                    state.registers.set_hl(u16::from(h) << 8 | u16::from(l));
-                    state.flags.n = false;
-                    state.flags.c = cflag;
-                    state.flags.h = hflag;
-                }
-                R16::HL => {
-                    let (h, l, cflag, hflag) = add_8_8(
-                        state.registers.h,
-                        state.registers.l,
-                        state.registers.get_hl(),
-                    );
-                    state.registers.set_hl(u16::from(h) << 8 | u16::from(l));
-                    state.flags.n = false;
-                    state.flags.c = cflag;
-                    state.flags.h = hflag;
-                }
-                R16::SP => {
-                    let (h, l, cflag, hflag) = add_8_8(
-                        (state.sp >> 8) as u8,
-                        (state.sp & 0xFF) as u8,
-                        state.registers.get_hl(),
-                    );
-                    state.registers.set_hl(u16::from(h) << 8 | u16::from(l));
-                    state.flags.n = false;
-                    state.flags.c = cflag;
-                    state.flags.h = hflag;
-                }
+    pub fn execute(&mut self, mem: &mut Mmu) -> u64 {
+        let opcode = mem.get(self.pc);
+        let clock_cycles;
+        match opcode {
+            // NOP
+            0x00 => {
+                clock_cycles = 1;
+                self.pc += 1;
             }
+            // ld r16, imm16
+            op if 0b11001111 & op == 0b00000001 => {
+                let register_pair = r16((op & 0b00110000) >> 4);
+                let imm16 = u16::from_le_bytes([mem.get(self.pc + 1), mem.get(self.pc + 2)]);
+                ld_r16(register_pair, self, imm16);
 
-            state.clock_cycles += 2;
-            state.pc += 1;
-        }
-        // INC r8
-        op if 0b11000111 & op == 0b00000100 => {
-            inc_r8(state, mem, op);
-
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // DEC r8
-        op if 0b11000111 & op == 0b00000101 => {
-            dec_r8(state, mem, op);
-
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // LD r8, imm8
-        op if 0b11000111 & op == 0b00000110 => {
-            ld_r8_imm(state, mem, op, mem.get(state.pc + 1));
-
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // RLCA
-        0x07 => {
-            state.registers.a = rotate_left(state, false, state.registers.a);
-            state.flags.z = false;
-            state.flags.n = false;
-            state.flags.h = false;
-
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // RRCA
-        0x0F => {
-            state.registers.a = rotate_right(state, false, state.registers.a);
-            state.flags.z = false;
-            state.flags.n = false;
-            state.flags.h = false;
-
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // RLA
-        0x17 => {
-            state.registers.a = rotate_left(state, true, state.registers.a);
-            state.flags.z = false;
-            state.flags.n = false;
-            state.flags.h = false;
-
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // RRA
-        0x1F => {
-            state.registers.a = rotate_right(state, true, state.registers.a);
-            state.flags.z = false;
-            state.flags.n = false;
-            state.flags.h = false;
-
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // DAA
-        // Code adapted from https://forums.nesdev.org/viewtopic.php?p=196282&sid=b1d399755b0f63e5d709a5d21bf1492e#p196282
-        0x27 => {
-            if !state.flags.n {
-                if state.flags.c || state.registers.a > 0x99 {
-                    state.registers.a = state.registers.a.wrapping_add(0x60);
-                    state.flags.c = true;
-                }
-                if state.flags.h || (state.registers.a & 0x0F) > 0x09 {
-                    state.registers.a = state.registers.a.wrapping_add(0x6);
-                }
-            } else {
-                if state.flags.c {
-                    state.registers.a = state.registers.a.wrapping_sub(0x60);
-                }
-                if state.flags.h {
-                    state.registers.a = state.registers.a.wrapping_sub(0x6);
-                }
+                clock_cycles = 3;
+                self.pc += 3;
             }
-            state.flags.z = state.registers.a == 0;
-            state.flags.h = false;
+            // ld [r16mem], a
+            op if 0b11001111 & op == 0b00000010 => {
+                ld_r16_mem_a(r16_mem((op & 0b00110000) >> 4), self, mem);
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // CPL
-        0x2F => {
-            state.registers.a = !state.registers.a;
-            state.flags.n = true;
-            state.flags.h = true;
+                clock_cycles = 2;
+                self.pc += 1
+            }
+            // ld a, [r16mem]
+            op if 0b11001111 & op == 0b00001010 => {
+                ld_a_r16_mem(r16_mem((op & 0b00110000) >> 4), self, mem);
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // SCF
-        0x37 => {
-            state.flags.n = false;
-            state.flags.h = false;
-            state.flags.c = true;
+                clock_cycles = 2;
+                self.pc += 1;
+            }
+            // ld [imm16], sp
+            0x08 => {
+                ld_imm16_sp(
+                    self,
+                    mem,
+                    u16::from_le_bytes([mem.get(self.pc + 1), mem.get(self.pc + 2)]),
+                );
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // CCF
-        0x3F => {
-            state.flags.n = false;
-            state.flags.h = false;
-            state.flags.c = !state.flags.c;
+                clock_cycles = 5;
+                self.pc += 3;
+            }
+            // inc r16
+            op if 0b11001111 & op == 0b00000011 => {
+                inc_r16(self, op);
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // JR imm8
-        0x18 => {
-            let val = mem.get(state.pc + 1) as i8;
-            state.pc += 2;
-            state.pc = state.pc.wrapping_add_signed(val.into());
+                clock_cycles = 2;
+                self.pc += 1;
+            }
+            // dec r16
+            op if 0b11001111 & op == 0b00001011 => {
+                dec_r16(self, op);
 
-            state.clock_cycles += 3;
-        }
-        // JR COND, imm8
-        op if 0b11100111 & op == 0b00100000 => {
-            jr_cond(state, mem, op);
-        }
-        // STOP
-        0x10 => {
-            mem.set(0xFF04, 0); // reset DIV register
-            state.pc += 2;
-        }
-        // LD r8, r8
-        op if 0b11000000 & op == 0b01000000 => {
-            ld_r8_r8(state, mem, op);
+                clock_cycles = 2;
+                self.pc += 1;
+            }
+            // add hl, r16
+            op if 0b11001111 & op == 0b00001001 => {
+                let operand = r16((op & 0b00110000) >> 4);
+                match operand {
+                    R16::BC => {
+                        let (h, l, cflag, hflag) =
+                            add_8_8(self.registers.b, self.registers.c, self.registers.get_hl());
+                        self.registers.set_hl(u16::from(h) << 8 | u16::from(l));
+                        self.flags.n = false;
+                        self.flags.c = cflag;
+                        self.flags.h = hflag;
+                    }
+                    R16::DE => {
+                        let (h, l, cflag, hflag) =
+                            add_8_8(self.registers.d, self.registers.e, self.registers.get_hl());
+                        self.registers.set_hl(u16::from(h) << 8 | u16::from(l));
+                        self.flags.n = false;
+                        self.flags.c = cflag;
+                        self.flags.h = hflag;
+                    }
+                    R16::HL => {
+                        let (h, l, cflag, hflag) =
+                            add_8_8(self.registers.h, self.registers.l, self.registers.get_hl());
+                        self.registers.set_hl(u16::from(h) << 8 | u16::from(l));
+                        self.flags.n = false;
+                        self.flags.c = cflag;
+                        self.flags.h = hflag;
+                    }
+                    R16::SP => {
+                        let (h, l, cflag, hflag) = add_8_8(
+                            (self.sp >> 8) as u8,
+                            (self.sp & 0xFF) as u8,
+                            self.registers.get_hl(),
+                        );
+                        self.registers.set_hl(u16::from(h) << 8 | u16::from(l));
+                        self.flags.n = false;
+                        self.flags.c = cflag;
+                        self.flags.h = hflag;
+                    }
+                }
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // ADD A, r8
-        op if 0b11111000 & op == 0b10000000 => {
-            state.flags = operate(state, mem, op, add);
+                clock_cycles = 2;
+                self.pc += 1;
+            }
+            // INC r8
+            op if 0b11000111 & op == 0b00000100 => {
+                clock_cycles = inc_r8(self, mem, op);
+                self.pc += 1;
+            }
+            // DEC r8
+            op if 0b11000111 & op == 0b00000101 => {
+                clock_cycles = dec_r8(self, mem, op);
+                self.pc += 1;
+            }
+            // LD r8, imm8
+            op if 0b11000111 & op == 0b00000110 => {
+                clock_cycles = ld_r8_imm(self, mem, op, mem.get(self.pc + 1));
+                self.pc += 2;
+            }
+            // RLCA
+            0x07 => {
+                self.registers.a = rotate_left(self, false, self.registers.a);
+                self.flags.z = false;
+                self.flags.n = false;
+                self.flags.h = false;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // ADC A, r8
-        op if 0b11111000 & op == 0b10001000 => {
-            state.flags = operate(state, mem, op, adc);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // RRCA
+            0x0F => {
+                self.registers.a = rotate_right(self, false, self.registers.a);
+                self.flags.z = false;
+                self.flags.n = false;
+                self.flags.h = false;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // SUB A, r8
-        op if 0b11111000 & op == 0b10010000 => {
-            state.flags = operate(state, mem, op, sub);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // RLA
+            0x17 => {
+                self.registers.a = rotate_left(self, true, self.registers.a);
+                self.flags.z = false;
+                self.flags.n = false;
+                self.flags.h = false;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // SBC A, r8
-        op if 0b11111000 & op == 0b10011000 => {
-            state.flags = operate(state, mem, op, sbc);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // RRA
+            0x1F => {
+                self.registers.a = rotate_right(self, true, self.registers.a);
+                self.flags.z = false;
+                self.flags.n = false;
+                self.flags.h = false;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // AND A, r8
-        op if 0b11111000 & op == 0b10100000 => {
-            state.flags = operate(state, mem, op, and_);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // DAA
+            // Code adapted from https://forums.nesdev.org/viewtopic.php?p=196282&sid=b1d399755b0f63e5d709a5d21bf1492e#p196282
+            0x27 => {
+                if !self.flags.n {
+                    if self.flags.c || self.registers.a > 0x99 {
+                        self.registers.a = self.registers.a.wrapping_add(0x60);
+                        self.flags.c = true;
+                    }
+                    if self.flags.h || (self.registers.a & 0x0F) > 0x09 {
+                        self.registers.a = self.registers.a.wrapping_add(0x6);
+                    }
+                } else {
+                    if self.flags.c {
+                        self.registers.a = self.registers.a.wrapping_sub(0x60);
+                    }
+                    if self.flags.h {
+                        self.registers.a = self.registers.a.wrapping_sub(0x6);
+                    }
+                }
+                self.flags.z = self.registers.a == 0;
+                self.flags.h = false;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // XOR A, r8
-        op if 0b11111000 & op == 0b10101000 => {
-            state.flags = operate(state, mem, op, xor_);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // CPL
+            0x2F => {
+                self.registers.a = !self.registers.a;
+                self.flags.n = true;
+                self.flags.h = true;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // OR A, r8
-        op if 0b11111000 & op == 0b10110000 => {
-            state.flags = operate(state, mem, op, or_);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // SCF
+            0x37 => {
+                self.flags.n = false;
+                self.flags.h = false;
+                self.flags.c = true;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // CP A, r8
-        op if 0b11111000 & op == 0b10111000 => {
-            state.flags = operate(state, mem, op, cp);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // CCF
+            0x3F => {
+                self.flags.n = false;
+                self.flags.h = false;
+                self.flags.c = !self.flags.c;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // ADD A, imm8
-        0xC6 => {
-            state.flags = operate_imm(state, mem, add);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // JR imm8
+            0x18 => {
+                let val = mem.get(self.pc + 1) as i8;
+                self.pc += 2;
+                self.pc = self.pc.wrapping_add_signed(val.into());
 
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // ADC A, imm8
-        0xCE => {
-            state.flags = operate_imm(state, mem, adc);
+                clock_cycles = 3;
+            }
+            // JR COND, imm8
+            op if 0b11100111 & op == 0b00100000 => {
+                clock_cycles = jr_cond(self, mem, op);
+            }
+            // STOP
+            0x10 => {
+                mem.set(0xFF04, 0); // reset DIV register
+                self.pc += 2;
+                clock_cycles = 1;
+            }
+            // LD r8, r8
+            op if 0b11000000 & op == 0b01000000 => {
+                clock_cycles = ld_r8_r8(self, mem, op);
+                self.pc += 1;
+            }
+            // ADD A, r8
+            op if 0b11111000 & op == 0b10000000 => {
+                (self.flags, clock_cycles) = operate(self, mem, op, add);
+                self.pc += 1;
+            }
+            // ADC A, r8
+            op if 0b11111000 & op == 0b10001000 => {
+                (self.flags, clock_cycles) = operate(self, mem, op, adc);
+                self.pc += 1;
+            }
+            // SUB A, r8
+            op if 0b11111000 & op == 0b10010000 => {
+                (self.flags, clock_cycles) = operate(self, mem, op, sub);
+                self.pc += 1;
+            }
+            // SBC A, r8
+            op if 0b11111000 & op == 0b10011000 => {
+                (self.flags, clock_cycles) = operate(self, mem, op, sbc);
+                self.pc += 1;
+            }
+            // AND A, r8
+            op if 0b11111000 & op == 0b10100000 => {
+                (self.flags, clock_cycles) = operate(self, mem, op, and_);
+                self.pc += 1;
+            }
+            // XOR A, r8
+            op if 0b11111000 & op == 0b10101000 => {
+                (self.flags, clock_cycles) = operate(self, mem, op, xor_);
+                self.pc += 1;
+            }
+            // OR A, r8
+            op if 0b11111000 & op == 0b10110000 => {
+                (self.flags, clock_cycles) = operate(self, mem, op, or_);
+                self.pc += 1;
+            }
+            // CP A, r8
+            op if 0b11111000 & op == 0b10111000 => {
+                (self.flags, clock_cycles) = operate(self, mem, op, cp);
+                self.pc += 1;
+            }
+            // ADD A, imm8
+            0xC6 => {
+                self.flags = operate_imm(self, mem, add);
 
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // SUB A, imm8
-        0xD6 => {
-            state.flags = operate_imm(state, mem, sub);
+                clock_cycles = 2;
+                self.pc += 2;
+            }
+            // ADC A, imm8
+            0xCE => {
+                self.flags = operate_imm(self, mem, adc);
 
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // SBC A, imm8
-        0xDE => {
-            state.flags = operate_imm(state, mem, sbc);
+                clock_cycles = 2;
+                self.pc += 2;
+            }
+            // SUB A, imm8
+            0xD6 => {
+                self.flags = operate_imm(self, mem, sub);
 
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // AND A, imm8
-        0xE6 => {
-            state.flags = operate_imm(state, mem, and_);
+                clock_cycles = 2;
+                self.pc += 2;
+            }
+            // SBC A, imm8
+            0xDE => {
+                self.flags = operate_imm(self, mem, sbc);
 
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // XOR A, imm8
-        0xEE => {
-            state.flags = operate_imm(state, mem, xor_);
+                clock_cycles = 2;
+                self.pc += 2;
+            }
+            // AND A, imm8
+            0xE6 => {
+                self.flags = operate_imm(self, mem, and_);
 
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // OR A, imm8
-        0xF6 => {
-            state.flags = operate_imm(state, mem, or_);
+                clock_cycles = 2;
+                self.pc += 2;
+            }
+            // XOR A, imm8
+            0xEE => {
+                self.flags = operate_imm(self, mem, xor_);
 
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // CP A, imm8
-        0xFE => {
-            state.flags = operate_imm(state, mem, cp);
+                clock_cycles = 2;
+                self.pc += 2;
+            }
+            // OR A, imm8
+            0xF6 => {
+                self.flags = operate_imm(self, mem, or_);
 
-            state.clock_cycles += 2;
-            state.pc += 2;
-        }
-        // RET COND
-        op if 0b11100111 & op == 0b11000000 => {
-            ret_cond(state, mem, op);
-        }
-        // RET
-        0xC9 => {
-            ret(state, mem);
+                clock_cycles = 2;
+                self.pc += 2;
+            }
+            // CP A, imm8
+            0xFE => {
+                self.flags = operate_imm(self, mem, cp);
 
-            state.clock_cycles += 4;
-        }
-        // RETI
-        0xD9 => {
-            state.ime = true;
-            ret(state, mem);
+                clock_cycles = 2;
+                self.pc += 2;
+            }
+            // RET COND
+            op if 0b11100111 & op == 0b11000000 => {
+                clock_cycles = ret_cond(self, mem, op);
+            }
+            // RET
+            0xC9 => {
+                ret(self, mem);
 
-            state.clock_cycles += 4;
-        }
-        // JP COND, imm16
-        op if 0b11100111 & op == 0b11000010 => {
-            jp_cond(state, mem, op);
-        }
-        // JP imm16
-        0xC3 => {
-            jp(state, mem);
-            state.clock_cycles += 4;
-        }
-        // JP HL
-        0xE9 => {
-            state.pc = state.registers.get_hl().into();
-            state.clock_cycles += 1;
-        }
-        // CALL COND, imm16
-        op if 0b11100111 & op == 0b11000100 => {
-            call_cond(state, mem, op);
-        }
-        // CALL, imm16
-        0xCD => {
-            call(state, mem);
-        }
-        // RST tgt3
-        op if 0b11000111 & op == 0b11000111 => {
-            state.sp -= 1;
-            mem.set(state.sp as u16, (((state.pc + 1) & 0xFF00) >> 8) as u8);
-            state.sp -= 1;
-            mem.set(state.sp as u16, ((state.pc + 1) & 0xFF) as u8);
+                clock_cycles = 4;
+            }
+            // RETI
+            0xD9 => {
+                self.ime = true;
+                ret(self, mem);
 
-            state.clock_cycles += 4;
-            state.pc = (0b00111000 & op) as usize;
-        }
-        // POP r16stk
-        op if 0b11001111 & op == 0b11000001 => {
-            pop_r16stk(state, mem, op);
+                clock_cycles = 4;
+            }
+            // JP COND, imm16
+            op if 0b11100111 & op == 0b11000010 => {
+                clock_cycles = jp_cond(self, mem, op);
+            }
+            // JP imm16
+            0xC3 => {
+                jp(self, mem);
+                clock_cycles = 4;
+            }
+            // JP HL
+            0xE9 => {
+                self.pc = self.registers.get_hl().into();
+                clock_cycles = 1;
+            }
+            // CALL COND, imm16
+            op if 0b11100111 & op == 0b11000100 => {
+                clock_cycles = call_cond(self, mem, op);
+            }
+            // CALL, imm16
+            0xCD => {
+                call(self, mem);
+                clock_cycles = 6;
+            }
+            // RST tgt3
+            op if 0b11000111 & op == 0b11000111 => {
+                self.sp -= 1;
+                mem.set(self.sp as u16, (((self.pc + 1) & 0xFF00) >> 8) as u8);
+                self.sp -= 1;
+                mem.set(self.sp as u16, ((self.pc + 1) & 0xFF) as u8);
 
-            state.clock_cycles += 3;
-            state.pc += 1;
-        }
-        // PUSH R16stk
-        op if 0b11001111 & op == 0b11000101 => {
-            push_r16stk(state, mem, op);
+                clock_cycles = 4;
+                self.pc = (0b00111000 & op) as usize;
+            }
+            // POP r16stk
+            op if 0b11001111 & op == 0b11000001 => {
+                pop_r16stk(self, mem, op);
 
-            state.clock_cycles += 4;
-            state.pc += 1;
-        }
-        // LDH [C], A
-        0xE2 => {
-            mem.set(0xFF00 + state.registers.c as u16, state.registers.a);
+                clock_cycles = 3;
+                self.pc += 1;
+            }
+            // PUSH R16stk
+            op if 0b11001111 & op == 0b11000101 => {
+                push_r16stk(self, mem, op);
 
-            state.clock_cycles += 2;
-            state.pc += 1;
-        }
-        // LDH [imm8], A
-        0xE0 => {
-            let addr = mem.get(state.pc + 1) as u16;
-            mem.set(0xFF00 + addr, state.registers.a);
+                clock_cycles = 4;
+                self.pc += 1;
+            }
+            // LDH [C], A
+            0xE2 => {
+                mem.set(0xFF00 + self.registers.c as u16, self.registers.a);
 
-            state.clock_cycles += 3;
-            state.pc += 2;
-        }
-        // LD [imm16], A
-        0xEA => {
-            let addr = (mem.get(state.pc + 2) as u16) << 8 | mem.get(state.pc + 1) as u16;
-            mem.set(addr, state.registers.a);
+                clock_cycles = 2;
+                self.pc += 1;
+            }
+            // LDH [imm8], A
+            0xE0 => {
+                let addr = mem.get(self.pc + 1) as u16;
+                mem.set(0xFF00 + addr, self.registers.a);
 
-            state.clock_cycles += 4;
-            state.pc += 3;
-        }
-        // LDH A, [C]
-        0xF2 => {
-            state.registers.a = mem.get(0xFF00 + state.registers.c as usize);
+                clock_cycles = 3;
+                self.pc += 2;
+            }
+            // LD [imm16], A
+            0xEA => {
+                let addr = (mem.get(self.pc + 2) as u16) << 8 | mem.get(self.pc + 1) as u16;
+                mem.set(addr, self.registers.a);
 
-            state.clock_cycles += 2;
-            state.pc += 1;
-        }
-        // LDH A, [imm8]
-        0xF0 => {
-            state.registers.a = mem.get(0xFF00 + mem[state.pc + 1] as usize);
+                clock_cycles = 4;
+                self.pc += 3;
+            }
+            // LDH A, [C]
+            0xF2 => {
+                self.registers.a = mem.get(0xFF00 + self.registers.c as usize);
 
-            state.clock_cycles += 3;
-            state.pc += 2;
-        }
-        // LD A, [imm16]
-        0xFA => {
-            state.registers.a =
-                mem.get((mem.get(state.pc + 2) as usize) << 8 | mem.get(state.pc + 1) as usize);
+                clock_cycles = 2;
+                self.pc += 1;
+            }
+            // LDH A, [imm8]
+            0xF0 => {
+                self.registers.a = mem.get(0xFF00 + mem[self.pc + 1] as usize);
 
-            state.clock_cycles += 4;
-            state.pc += 3;
-        }
-        // ADD SP, imm8
-        0xE8 => {
-            let diff = mem[state.pc + 1] as i8;
-            let prev = state.sp as u16;
-            let result = prev.wrapping_add_signed(diff.into());
-            state.sp = result as usize;
-            state.flags.z = false;
-            state.flags.n = false;
-            state.flags.h = if diff >= 0 {
-                (prev & 0xF) + ((diff as u16) & 0xF) > 0xF
-            } else {
-                ((prev as usize) & 0x0F) >= ((-diff) as usize & 0x0F)
-                // ((prev & 0x0F).wrapping_sub(diff as u16 & 0x0F)) & 0x10 != 0
-            };
-            state.flags.c = if diff >= 0 {
-                (prev & 0xFF) + ((diff as u16) & 0xFF) > 0xFF
-            } else {
-                ((prev as usize) & 0xFF) >= (((-diff) as usize) & 0xFF)
-            };
-            // if diff == -1 {
-            //     println!(
-            //         "a: {:#06x}, a - 1: {:#06x}, c: {}, h: {}",
-            //         prev,
-            //         result,
-            //         if state.flags.c { 1 } else { 0 },
-            //         if state.flags.h { 1 } else { 0 }
-            //     );
-            // }
-            state.clock_cycles += 4;
-            state.pc += 2;
-        }
-        // LD HL, SP + imm8
-        0xF8 => {
-            let diff = mem[state.pc + 1] as i8;
-            let prev = state.sp;
-            let result = prev.wrapping_add_signed(diff.into());
-            state.registers.set_hl(result as u16);
-            state.flags.z = false;
-            state.flags.n = false;
-            state.flags.h = if diff >= 0 {
-                (prev & 0xF) + ((diff as usize) & 0xF) > 0xF
-            } else {
-                ((prev as usize) & 0x0F) >= ((-diff) as usize & 0x0F)
-                // ((prev & 0x0F).wrapping_sub(diff as usize & 0x0F)) & 0x10 != 0
-            };
-            state.flags.c = if diff >= 0 {
-                (prev & 0xFF) + ((diff as usize) & 0xFF) > 0xFF
-            } else {
-                ((prev as usize) & 0xFF) >= (((-diff) as usize) & 0xFF)
-            };
+                clock_cycles = 3;
+                self.pc += 2;
+            }
+            // LD A, [imm16]
+            0xFA => {
+                self.registers.a =
+                    mem.get((mem.get(self.pc + 2) as usize) << 8 | mem.get(self.pc + 1) as usize);
 
-            state.clock_cycles += 3;
-            state.pc += 2;
-        }
-        // LD SP, HL
-        0xF9 => {
-            state.sp = state.registers.get_hl() as usize;
+                clock_cycles = 4;
+                self.pc += 3;
+            }
+            // ADD SP, imm8
+            0xE8 => {
+                let diff = mem[self.pc + 1] as i8;
+                let prev = self.sp as u16;
+                let result = prev.wrapping_add_signed(diff.into());
+                self.sp = result as usize;
+                self.flags.z = false;
+                self.flags.n = false;
+                self.flags.h = if diff >= 0 {
+                    (prev & 0xF) + ((diff as u16) & 0xF) > 0xF
+                } else {
+                    ((prev as usize) & 0x0F) >= ((-diff) as usize & 0x0F)
+                    // ((prev & 0x0F).wrapping_sub(diff as u16 & 0x0F)) & 0x10 != 0
+                };
+                self.flags.c = if diff >= 0 {
+                    (prev & 0xFF) + ((diff as u16) & 0xFF) > 0xFF
+                } else {
+                    ((prev as usize) & 0xFF) >= (((-diff) as usize) & 0xFF)
+                };
+                // if diff == -1 {
+                //     println!(
+                //         "a: {:#06x}, a - 1: {:#06x}, c: {}, h: {}",
+                //         prev,
+                //         result,
+                //         if self.flags.c { 1 } else { 0 },
+                //         if self.flags.h { 1 } else { 0 }
+                //     );
+                // }
+                clock_cycles = 4;
+                self.pc += 2;
+            }
+            // LD HL, SP + imm8
+            0xF8 => {
+                let diff = mem[self.pc + 1] as i8;
+                let prev = self.sp;
+                let result = prev.wrapping_add_signed(diff.into());
+                self.registers.set_hl(result as u16);
+                self.flags.z = false;
+                self.flags.n = false;
+                self.flags.h = if diff >= 0 {
+                    (prev & 0xF) + ((diff as usize) & 0xF) > 0xF
+                } else {
+                    ((prev as usize) & 0x0F) >= ((-diff) as usize & 0x0F)
+                    // ((prev & 0x0F).wrapping_sub(diff as usize & 0x0F)) & 0x10 != 0
+                };
+                self.flags.c = if diff >= 0 {
+                    (prev & 0xFF) + ((diff as usize) & 0xFF) > 0xFF
+                } else {
+                    ((prev as usize) & 0xFF) >= (((-diff) as usize) & 0xFF)
+                };
 
-            state.clock_cycles += 2;
-            state.pc += 1;
-        }
-        // DI
-        0xF3 => {
-            state.ime = false;
+                clock_cycles = 3;
+                self.pc += 2;
+            }
+            // LD SP, HL
+            0xF9 => {
+                self.sp = self.registers.get_hl() as usize;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        // EI
-        0xFB => {
-            state.ime_delay = true;
+                clock_cycles = 2;
+                self.pc += 1;
+            }
+            // DI
+            0xF3 => {
+                self.ime = false;
 
-            state.clock_cycles += 1;
-            state.pc += 1;
-        }
-        0xCB => {
-            execute_prefix_cb(state, mem);
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            // EI
+            0xFB => {
+                self.ime_delay = true;
 
-            state.pc += 1;
+                clock_cycles = 1;
+                self.pc += 1;
+            }
+            0xCB => {
+                clock_cycles = execute_prefix_cb(self, mem);
+
+                self.pc += 1;
+            }
+            op => {
+                panic!("Unrecognized opcode {:#02x}", op);
+            }
         }
-        op => {
-            panic!("Unrecognized opcode {:#02x}", op);
+        clock_cycles * 4
+    }
+
+    pub fn handle_interrupt(&mut self, mem: &mut Mmu, interrupt: &Interrupt) {
+        interrupt.clear(mem);
+        self.ime = false;
+        self.sp -= 2;
+        mem.set(self.sp as u16, (self.pc & 0xFF) as u8);
+        mem.set(self.sp as u16 + 1, (self.pc >> 8) as u8);
+        self.pc = interrupt.address() as usize;
+    }
+
+    pub fn handle_interrupts(&mut self, mem: &mut Mmu) {
+        for interrupt in get_interrupts(mem) {
+            self.halted = false;
+            if self.ime && interrupt.enabled(mem) {
+                self.handle_interrupt(mem, &interrupt);
+            }
         }
+    }
+
+    pub fn log_state(&self, mem: &Mmu) {
+        println!("A: {:02X} F: {:02X} B: {:02X} C: {:02X} D: {:02X} E: {:02X} H: {:02X} L: {:02X} SP: {:04X} PC: 00:{:04X} ({:02X} {:02X} {:02X} {:02X})", self.registers.a, self.get_f_register(), self.registers.b, self.registers.c, self.registers.d, self.registers.e, self.registers.h, self.registers.l, self.sp, self.pc, mem[self.pc], mem[self.pc + 1], mem[self.pc + 2], mem[self.pc + 3]);
     }
 }
 
@@ -1605,7 +1546,7 @@ fn set(state: &mut Cpu, mem: &mut Mmu, opcode: u8) {
     set_register_value(state, mem, operand, val | (1 << bit));
 }
 
-fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
+fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) -> u64 {
     let opcode = mem.get(state.pc + 1);
     let operand = r8(opcode & 0b00000111);
     let val = get_register_value(state, mem, operand);
@@ -1619,7 +1560,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
             state.flags.h = false;
             state.flags.z = new_val == 0;
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // RRC r8
@@ -1631,7 +1571,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
             state.flags.h = false;
             state.flags.z = new_val == 0;
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // RL r8
@@ -1643,7 +1582,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
             state.flags.h = false;
             state.flags.z = new_val == 0;
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // RR r8
@@ -1655,7 +1593,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
             state.flags.h = false;
             state.flags.z = new_val == 0;
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // SLA r8
@@ -1663,7 +1600,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
             let new_val = sla_r8(state, val);
             set_register_value(state, mem, operand, new_val);
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // SRA r8
@@ -1671,7 +1607,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
             let new_val = sra_r8(state, val);
             set_register_value(state, mem, operand, new_val);
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // SWAP r8
@@ -1679,7 +1614,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
             let new_val = swap_r8(state, val);
             set_register_value(state, mem, operand, new_val);
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // SRL r8
@@ -1687,7 +1621,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
             let new_val = srl_r8(state, val);
             set_register_value(state, mem, operand, new_val);
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // BIT b, r8
@@ -1696,99 +1629,106 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) {
 
             state.flags.n = false;
             state.flags.h = true;
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // RES b, r8
         op if 0b11000000 & op == 0b10000000 => {
             res(state, mem, op);
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         // SET b, r8
         op if 0b11000000 & op == 0b11000000 => {
             set(state, mem, op);
 
-            state.clock_cycles += 2;
             state.pc += 1;
         }
         _ => {
             panic!("Unrecognized opcode {:#02x}", opcode);
         }
     }
-}
-
-pub fn emulate(mem: &mut Mmu) {
-    let mut state: Cpu = Default::default();
-
-    let mut now = Instant::now();
-    let mut total_cycles = 0u64;
-    let mut timer_cycle_count = 0;
-    loop {
-        for interrupt in get_interrupts(mem[0xFF0F]) {
-            state.halted = false;
-            if state.ime && interrupt.enabled(mem) {
-                interrupt.handle(&mut state, mem);
-            }
-        }
-        // println!("A: {:02X} F: {:02X} B: {:02X} C: {:02X} D: {:02X} E: {:02X} H: {:02X} L: {:02X} SP: {:04X} PC: 00:{:04X} ({:02X} {:02X} {:02X} {:02X})", state.registers.a, state.get_f_register(), state.registers.b, state.registers.c, state.registers.d, state.registers.e, state.registers.h, state.registers.l, state.sp, state.pc, mem[state.pc], mem[state.pc + 1], mem[state.pc + 2], mem[state.pc + 3]);
-
-        if !state.stopped && !state.halted {
-            execute(&mut state, mem);
-        } else {
-            state.clock_cycles += 1;
-        }
-
-        let time_elapsed = now.elapsed();
-        now = Instant::now();
-        let cycles_elapsed = state.clock_cycles as u64 - total_cycles;
-        if Duration::from_nanos(cycles_elapsed * 1_000_000_000 / CLOCK_SPEED) > time_elapsed {
-            ::std::thread::sleep(Duration::from_nanos(
-                cycles_elapsed * 1_000_000_000 / CLOCK_SPEED - time_elapsed.as_nanos() as u64,
-            ));
-        } else {
-        }
-        if time_elapsed > Duration::from_nanos(1_000_000_000 / DIV_RATE) {
-            mem.inc_div();
-        }
-
-        let tac = mem[0xFF07];
-        let timer_enable = (tac & 0b00000100) >> 2 == 1;
-        let timer_cycles = match tac & 0b00000011 {
-            0 => 256,
-            1 => 4,
-            2 => 16,
-            3 => 64,
-            n => panic!("Invalid clock select {n}"),
-        };
-
-        if timer_enable {
-            timer_cycle_count += cycles_elapsed;
-            while timer_cycle_count >= timer_cycles {
-                timer_cycle_count -= timer_cycles;
-                let (incremented, overflowed) = mem.get(0xFF05).overflowing_add(1);
-                if overflowed {
-                    mem.set(0xFF05, mem[0xFF06]);
-                    Interrupt::Timer.trigger(mem);
-                } else {
-                    mem.set(0xFF05, incremented);
-                }
-            }
-        }
-        total_cycles = state.clock_cycles as u64;
-
-        if mem[0xFF01] != 0 {
-            print!("{}", mem[0xFF01] as char);
-            mem[0xFF01] = 0;
-        }
-
-        if state.ime_delay {
-            state.ime = true;
-            state.ime_delay = false;
-        }
+    // Return 3 cycles for BIT instructions accessing [HL], 4 cycles for other
+    // instructions accessing [HL], and 2 cycles for all other instructions
+    if operand == R8::HLMem && 0b11000000 & opcode == 0b01000000 {
+        3
+    } else if operand == R8::HLMem {
+        4
+    } else {
+        2
     }
 }
+
+// pub fn run_cpu(mem: &mut Mmu, target_cycles: usize) -> u64 {
+//     let mut state: Cpu = Default::default();
+
+//     let mut now = Instant::now();
+//     let mut total_cycles = 0u64;
+//     let mut timer_cycle_count = 0;
+//     while state.clock_cycles < target_cycles {
+//         for interrupt in get_interrupts(mem[0xFF0F]) {
+//             state.halted = false;
+//             if state.ime && interrupt.enabled(mem) {
+//                 interrupt.handle(&mut state, mem);
+//             }
+//         }
+//         // println!("A: {:02X} F: {:02X} B: {:02X} C: {:02X} D: {:02X} E: {:02X} H: {:02X} L: {:02X} SP: {:04X} PC: 00:{:04X} ({:02X} {:02X} {:02X} {:02X})", state.registers.a, state.get_f_register(), state.registers.b, state.registers.c, state.registers.d, state.registers.e, state.registers.h, state.registers.l, state.sp, state.pc, mem[state.pc], mem[state.pc + 1], mem[state.pc + 2], mem[state.pc + 3]);
+
+//         if !state.stopped && !state.halted {
+//             execute(&mut state, mem);
+//         } else {
+//             state.clock_cycles += 1;
+//         }
+
+//         let time_elapsed = now.elapsed();
+//         now = Instant::now();
+//         let cycles_elapsed = state.clock_cycles as u64 - total_cycles;
+//         if Duration::from_nanos(cycles_elapsed * 1_000_000_000 / CLOCK_SPEED) > time_elapsed {
+//             ::std::thread::sleep(Duration::from_nanos(
+//                 cycles_elapsed * 1_000_000_000 / CLOCK_SPEED - time_elapsed.as_nanos() as u64,
+//             ));
+//         } else {
+//         }
+//         if time_elapsed > Duration::from_nanos(1_000_000_000 / DIV_RATE) {
+//             mem.inc_div();
+//         }
+
+//         let tac = mem[0xFF07];
+//         let timer_enable = (tac & 0b00000100) >> 2 == 1;
+//         let timer_cycles = match tac & 0b00000011 {
+//             0 => 256,
+//             1 => 4,
+//             2 => 16,
+//             3 => 64,
+//             n => panic!("Invalid clock select {n}"),
+//         };
+
+//         if timer_enable {
+//             timer_cycle_count += cycles_elapsed;
+//             while timer_cycle_count >= timer_cycles {
+//                 timer_cycle_count -= timer_cycles;
+//                 let (incremented, overflowed) = mem.get(0xFF05).overflowing_add(1);
+//                 if overflowed {
+//                     mem.set(0xFF05, mem[0xFF06]);
+//                     Interrupt::Timer.trigger(mem);
+//                 } else {
+//                     mem.set(0xFF05, incremented);
+//                 }
+//             }
+//         }
+//         total_cycles = state.clock_cycles as u64;
+
+//         if mem[0xFF01] != 0 {
+//             print!("{}", mem[0xFF01] as char);
+//             mem[0xFF01] = 0;
+//         }
+
+//         if state.ime_delay {
+//             state.ime = true;
+//             state.ime_delay = false;
+//         }
+//     }
+//     state.clock_cycles = 0;
+// }
 
 #[cfg(test)]
 mod tests {
