@@ -84,7 +84,7 @@ impl APU {
             if buffer.len() < self.sample_rate as usize / 10 {
                 let sample1 = self.pulse_channel_1.generate_sample(mmu);
                 let sample2 = self.pulse_channel_2.generate_sample(mmu);
-                buffer.push(sample1 + sample2 / 2.0);
+                buffer.push((sample1 + sample2) / 2.0);
             }
         }
         self.clock_cycles -=
@@ -178,7 +178,7 @@ pub struct PulseChannel {
     duty_cycle: u8,
     length_timer: u8,
     length_timer_enabled: bool,
-    period: u16,
+    period_value: u16,
     initial_volume: u8,
     volume_envelope_increasing: bool,
     volume_sweep_pace: u8,
@@ -240,7 +240,7 @@ impl PulseChannel {
             duty_cycle: 0,
             length_timer: 0,
             length_timer_enabled: false,
-            period: 0,
+            period_value: 0,
             initial_volume: 0,
             volume_envelope_increasing: false,
             volume_sweep_pace: 0,
@@ -257,19 +257,27 @@ impl PulseChannel {
 
     fn enable(&mut self, mmu: &mut Mmu) {
         self.enabled = true;
-        mmu.set(NR52 as u16, mmu.get(NR52) | 0b0000_0001);
+        if self.channel_number == 1 {
+            mmu.set(NR52 as u16, mmu.get(NR52) | 0b0000_0001);
+        } else if self.channel_number == 2 {
+            mmu.set(NR52 as u16, mmu.get(NR52) | 0b0000_0010);
+        }
     }
 
     fn disable(&mut self, mmu: &mut Mmu) {
         self.enabled = false;
-        mmu.set(NR52 as u16, mmu.get(NR52) & 0b1111_1110);
+        if self.channel_number == 1 {
+            mmu.set(NR52 as u16, mmu.get(NR52) & 0b1111_1110);
+        } else if self.channel_number == 2 {
+            mmu.set(NR52 as u16, mmu.get(NR52) & 0b1111_1101);
+        }
     }
 
     fn update_period(&mut self, mmu: &mut Mmu) {
         let nr10 = self.nrx0.map(|x| mmu.get(x as usize));
         let nr13 = mmu.get(self.nrx3 as usize);
         let nr14 = mmu.get(self.nrx4 as usize);
-        let initial_period = ((nr14 & 0b0000_0111) as u16) << 8 | nr13 as u16;
+        let initial_period_value = ((nr14 & 0b0000_0111) as u16) << 8 | nr13 as u16;
         if let Some(nr10) = nr10 {
             self.freq_sweep_increase = (nr10 & 0b0000_1000) == 0;
             self.freq_sweep_shift = nr10 & 0b0000_0111;
@@ -277,32 +285,33 @@ impl PulseChannel {
                 && self.freq_sweep_period != 0
                 && (self.div_apu >> 2) - (self.prev_div_apu_freq >> 2)
                     >= self.freq_sweep_period as u32
-            // && (self.div_apu >> 2) % self.freq_sweep_period as u32 == 0
             {
-                self.freq_sweep_period = nr10 & 0b0111_0000;
                 self.freq_sweep_triggered = false;
-                self.period = if self.freq_sweep_increase {
-                    let new_period = initial_period + (initial_period >> self.freq_sweep_shift);
-                    if new_period >= 0x7FF {
-                        self.enabled = false;
-                        0x7FF
+                self.period_value = if self.freq_sweep_increase {
+                    let new_period_value =
+                        initial_period_value + (initial_period_value >> self.freq_sweep_shift);
+                    if new_period_value > 0x7FF {
+                        self.disable(mmu);
+                        new_period_value
                     } else {
-                        new_period
+                        new_period_value
                     }
                 } else {
-                    initial_period - (initial_period >> self.freq_sweep_shift)
+                    initial_period_value - (initial_period_value >> self.freq_sweep_shift)
                 };
-                println!("Period: {}", self.period);
-                mmu.set(self.nrx3, (self.period & 0xFF) as u8);
-                mmu.set(self.nrx4, (nr14 & 0b1100_0000) | (self.period >> 8) as u8);
+                mmu.set(self.nrx3, (self.period_value & 0xFF) as u8);
+                mmu.set(
+                    self.nrx4,
+                    (nr14 & 0b1100_0000) | (0x7 & (self.period_value >> 8)) as u8,
+                );
                 self.prev_div_apu_freq = self.div_apu;
             } else {
-                self.period = initial_period;
+                self.period_value = initial_period_value;
             }
         } else {
-            self.period = initial_period;
+            self.period_value = initial_period_value;
         }
-        self.channel.frequency = 131072.0 / (2048.0 - self.period as f32);
+        self.channel.frequency = 131072.0 / (2048.0 - self.period_value as f32);
     }
 
     fn update_volume(&mut self, mmu: &mut Mmu) {
@@ -347,24 +356,22 @@ impl PulseChannel {
     }
 
     pub fn generate_sample(&mut self, mmu: &mut Mmu) -> f32 {
-        let nr10 = mmu.get(0xFF10);
-        let nr14 = mmu.get(0xFF14);
+        let nr10 = self.nrx0.map(|x| mmu.get(x as usize));
+        let nr14 = mmu.get(self.nrx4 as usize);
         if nr14 & 0b1000_0000 != 0 {
             self.triggered = true;
             self.enable(mmu);
-            self.freq_sweep_period = (nr10 & 0b0111_0000) >> 4;
+            self.freq_sweep_period = nr10.map_or(0, |x| (x & 0b0111_0000) >> 4);
             self.freq_sweep_triggered = true;
         }
         self.update_period(mmu);
         self.update_volume(mmu);
         self.update_duty_cycle(mmu);
         self.triggered = false;
-        let sample = if self.enabled {
+        if self.enabled {
             self.channel.generate_sample()
         } else {
             0.0
-        };
-
-        sample
+        }
     }
 }
