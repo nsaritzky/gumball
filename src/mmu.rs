@@ -3,6 +3,7 @@ use std::io::Read;
 use std::ops::{Index, IndexMut};
 
 use crate::input::{Button, Input};
+use crate::registers::*;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum MBC {
@@ -190,6 +191,10 @@ impl Mmu {
             0xFF00 => self.input.read_ff00(),
             _ => self.memory[address],
         }
+    }
+
+    pub fn get_wave_ram(&self) -> &[u8] {
+        &self.memory[WAVE_RAM_START..WAVE_RAM_START + 0x10]
     }
 
     pub fn inc_div(&mut self) {

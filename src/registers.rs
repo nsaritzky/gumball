@@ -11,3 +11,4 @@ pub const WX: usize = 0xFF4B;
 pub const OBP0: usize = 0xFF48;
 pub const OBP1: usize = 0xFF49;
 pub const BGP: usize = 0xFF47;
+pub const WAVE_RAM_START: usize = 0xFF30;

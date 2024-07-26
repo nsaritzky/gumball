@@ -1,6 +1,6 @@
 use sdl2::audio::{AudioCallback, AudioFormatNum};
 use std::{
-    cmp::{max, min},
+    cmp::min,
     sync::{Arc, Mutex},
 };
 
@@ -19,6 +19,7 @@ pub struct APU {
     sample_rate: i32,
     pulse_channel_1: PulseChannel,
     pulse_channel_2: PulseChannel,
+    wave_channel: WaveChannel,
 }
 
 impl AudioCallback for APU {
@@ -69,6 +70,7 @@ impl APU {
                 0xFF18,
                 0xFF19,
             ),
+            wave_channel: WaveChannel::new(sample_rate),
         }
     }
 
@@ -84,7 +86,8 @@ impl APU {
             if buffer.len() < self.sample_rate as usize / 10 {
                 let sample1 = self.pulse_channel_1.generate_sample(mmu);
                 let sample2 = self.pulse_channel_2.generate_sample(mmu);
-                buffer.push((sample1 + sample2) / 2.0);
+                let sample3 = self.wave_channel.generate_sample(mmu);
+                buffer.push((sample1 + sample2 + sample3) / 3.0);
             }
         }
         self.clock_cycles -=
@@ -325,15 +328,14 @@ impl PulseChannel {
             self.channel.amplitude = self.initial_volume;
             self.volume_envelope_increasing = (nr12 & 0b0000_1000) != 0;
             self.volume_sweep_pace = nr12 & 0b0000_0111;
-            // if nr12 & 0b1111_1000 != 0 && !self.enabled {
-            //     self.channel.fade_in();
-            // }
         } else if self.volume_sweep_pace != 0 {
             if (self.div_apu >> 3) - (self.prev_div_apu_vol >> 3) >= self.volume_sweep_pace as u32 {
-                // if (self.div_apu >> 3) % self.volume_sweep_pace as u32 == 0 {
                 if self.volume_envelope_increasing {
                     self.channel.amplitude = min(15, self.channel.amplitude.saturating_add(1));
                 } else {
+                    if self.channel_number == 2 {
+                        println!("Amplitude: {}", self.channel.amplitude);
+                    }
                     self.channel.amplitude = self.channel.amplitude.saturating_sub(1);
                 }
                 self.prev_div_apu_vol = self.div_apu;
@@ -373,5 +375,82 @@ impl PulseChannel {
         } else {
             0.0
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct WaveChannel {
+    pub enabled: bool,
+    buffer: Arc<Mutex<Vec<f32>>>,
+    triggered: bool,
+    sample_rate: i32,
+    period_value: u16,
+    frequency: f32,
+    volume: f32,
+    phase: f32,
+}
+
+impl WaveChannel {
+    pub fn new(sample_rate: i32) -> Self {
+        Self {
+            enabled: false,
+            buffer: Arc::new(Mutex::new(Vec::new())),
+            triggered: false,
+            sample_rate,
+            period_value: 0,
+            frequency: 0.0,
+            volume: 0.0,
+            phase: 0.0,
+        }
+    }
+
+    fn enable(&mut self, mmu: &mut Mmu) {
+        self.enabled = true;
+        mmu.set(0xFF1A, mmu.get(0xFF1A) | 0b1000_0000);
+    }
+
+    fn disable(&mut self, mmu: &mut Mmu) {
+        self.enabled = false;
+        mmu.set(0xFF1A, mmu.get(0xFF1A) & 0b0111_1111);
+    }
+
+    fn generate_sample(&mut self, mmu: &mut Mmu) -> f32 {
+        let nr30 = mmu.get(0xFF1A);
+        let nr31 = mmu.get(0xFF1B);
+        let nr32 = mmu.get(0xFF1C);
+        let nr33 = mmu.get(0xFF1D);
+        let nr34 = mmu.get(0xFF1E);
+        if nr34 & 0b1000_0000 != 0 {
+            self.triggered = true;
+            self.enable(mmu);
+        }
+        if nr30 & 0b1000_0000 == 0 {
+            self.disable(mmu);
+            return 0.0;
+        }
+        let wave_ram = mmu.get_wave_ram();
+        let period_value = ((nr34 & 0b0000_0111) as u16) << 8 | nr33 as u16;
+        let frequency = 65536.0 / (2048.0 - period_value as f32);
+
+        let sample_index = (self.phase as usize) % 32;
+        let sample = if sample_index % 2 == 0 {
+            wave_ram[sample_index / 2] & 0xF
+        } else {
+            wave_ram[sample_index / 2] >> 4
+        };
+
+        let volume_shift: usize = match nr32 & 0b0110_0000 {
+            0b0000_0000 => 4,
+            0b0010_0000 => 0,
+            0b0100_0000 => 1,
+            0b0110_0000 => 2,
+            _ => unreachable!(),
+        };
+
+        let sample = sample >> volume_shift;
+
+        self.phase = (self.phase + frequency / self.sample_rate as f32) % 32.0;
+
+        sample as f32
     }
 }
