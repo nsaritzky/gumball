@@ -1,14 +1,12 @@
 use sdl2::pixels::Color;
-use sdl2::pixels::PixelFormatEnum::RGB24;
-use sdl2::render::{Canvas, Texture};
-use sdl2::video::Window;
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::interrupts::Interrupt;
+use crate::media::Renderer;
 use crate::mmu::Mmu;
-use crate::{registers::*, WindowCreator};
+use crate::registers::*;
 
 // Clock speed in Hz
 const CLOCK_SPEED: u32 = 4_194_304;
@@ -87,14 +85,13 @@ pub struct PPU<'a> {
     lx: u8,
     window_counter: u8,
     tall_sprites: bool,
-    canvas: &'a mut Canvas<Window>,
-    texture: Texture<'a>,
+    renderer: Box<dyn Renderer + 'a>,
     cycle_counter: i32,
     mode3_extra_cycles: i32,
 }
 
 impl<'a> PPU<'a> {
-    pub fn new(canvas: &'a mut Canvas<Window>, texture: Texture<'a>) -> Result<Self, String> {
+    pub fn new(renderer: impl Renderer + 'a) -> Result<Self, String> {
         Ok(PPU {
             bg_fifo: VecDeque::new(),
             sprite_fifo: VecDeque::new(),
@@ -106,8 +103,7 @@ impl<'a> PPU<'a> {
             lx: 0,
             window_counter: 0,
             tall_sprites: false,
-            canvas,
-            texture,
+            renderer: Box::new(renderer),
             cycle_counter: 0,
             mode3_extra_cycles: 0,
         })
@@ -125,11 +121,7 @@ impl<'a> PPU<'a> {
                     mem.set(LY as u16, 0);
                     Interrupt::VBlank.trigger(mem);
                     self.window_counter = 0;
-                    self.texture
-                        .update(None, &self.pixel_buffer, 160 * 3)
-                        .map_err(|e| e.to_string())?;
-                    self.canvas.copy(&self.texture, None, None)?;
-                    self.canvas.present();
+                    self.renderer.render(&self.pixel_buffer)?;
                     self.mode = PPUMode::OAMSearch;
                     return Ok(true);
                 }

@@ -5,12 +5,17 @@ mod debugger;
 mod emulator;
 mod input;
 mod interrupts;
+mod media;
 mod mmu;
 mod ppu;
 mod registers;
+mod sdl;
 mod window;
 
+use std::{cell::RefCell, rc::Rc};
+
 use clap::Parser;
+use sdl::SdlRenderer;
 
 pub struct WindowCreator {
     canvas: sdl2::render::Canvas<sdl2::video::Window>,
@@ -100,21 +105,18 @@ fn main() {
 
     let event_pump = sdl_context.event_pump().unwrap();
 
+    let renderer = SdlRenderer(
+        main_window_creator
+            .texture_creator
+            .create_texture_streaming(sdl2::pixels::PixelFormatEnum::RGB24, 160, 144)
+            .expect("Could not create texture"),
+        Rc::new(RefCell::new(main_window_creator.canvas)),
+    );
+
     match rom {
         Ok(rom) => {
             mem.initialize_memory(rom);
-            let emulator = emulator::Emulator::new(
-                &mut main_window_creator.canvas,
-                main_window_creator
-                    .texture_creator
-                    .create_texture_streaming(sdl2::pixels::PixelFormatEnum::RGB24, 160, 144)
-                    .expect("Could not create texture"),
-                mem,
-                &audio_subsystem,
-                event_pump,
-                bg_window_creator,
-                window_window,
-            );
+            let emulator = emulator::Emulator::new(renderer, mem, &audio_subsystem, event_pump);
             let _ = emulator.and_then(|mut e| Ok(e.run(args.debug).map_err(|e| println!("{}", e))));
         }
         Err(e) => panic!("Error loading rom: {e}"),

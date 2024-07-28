@@ -1,7 +1,4 @@
-use sdl2::event::Event::{KeyDown, KeyUp};
-use sdl2::keyboard::Keycode;
-
-use crate::mmu::Mmu;
+use crate::media::{Event, KeyEvent};
 
 pub enum Button {
     A,
@@ -12,6 +9,7 @@ pub enum Button {
     Down,
     Left,
     Right,
+    Quit,
 }
 
 #[derive(Debug, Default)]
@@ -85,6 +83,7 @@ impl Input {
             Button::Left => self.left = true,
             Button::Up => self.up = true,
             Button::Down => self.down = true,
+            _ => {}
         }
     }
 
@@ -98,36 +97,39 @@ impl Input {
             Button::Left => self.left = false,
             Button::Up => self.up = false,
             Button::Down => self.down = false,
+            _ => {}
         }
     }
 
-    fn key_to_button(key: Keycode) -> Option<Button> {
-        match key {
-            Keycode::Z => Some(Button::A),
-            Keycode::X => Some(Button::B),
-            Keycode::Return => Some(Button::Start),
-            Keycode::RShift => Some(Button::Select),
-            Keycode::Up => Some(Button::Up),
-            Keycode::Down => Some(Button::Down),
-            Keycode::Left => Some(Button::Left),
-            Keycode::Right => Some(Button::Right),
-            _ => None,
-        }
-    }
+    // pub fn handle_event(&mut self, event: &sdl2::event::Event) {
+    //     match event {
+    //         KeyDown {
+    //             keycode: Some(key), ..
+    //         } => {
+    //             if let Some(button) = Self::key_to_button(*key) {
+    //                 self.press_button(button);
+    //             }
+    //         }
+    //         KeyUp {
+    //             keycode: Some(key), ..
+    //         } => {
+    //             if let Some(button) = Self::key_to_button(*key) {
+    //                 self.release_button(button);
+    //             }
+    //         }
+    //         _ => {}
+    //     }
+    // }
 
-    pub fn handle_event(&mut self, event: &sdl2::event::Event) {
-        match event {
-            KeyDown {
-                keycode: Some(key), ..
-            } => {
-                if let Some(button) = Self::key_to_button(*key) {
+    pub fn handle_event(&mut self, event: &dyn Event) {
+        match event.to_key_event() {
+            KeyEvent::Pressed(optBtn) => {
+                if let Some(button) = optBtn {
                     self.press_button(button);
                 }
             }
-            KeyUp {
-                keycode: Some(key), ..
-            } => {
-                if let Some(button) = Self::key_to_button(*key) {
+            KeyEvent::Released(optBtn) => {
+                if let Some(button) = optBtn {
                     self.release_button(button);
                 }
             }

@@ -1,19 +1,13 @@
 use sdl2::audio::{AudioDevice, AudioSpecDesired};
-use sdl2::event::Event;
-use sdl2::keyboard::Keycode;
-use sdl2::render::Canvas;
-use sdl2::video::Window;
-use sdl2::EventPump;
 use std::time::{Duration, Instant};
 
-use crate::apu::{PulseChannel, APU};
-use crate::background::BackgroundDisplay;
+use crate::apu::APU;
 use crate::cpu::Cpu;
+use crate::input::Button;
 use crate::interrupts::Interrupt;
+use crate::media::{Event, EventQueue, KeyEvent, Renderer};
 use crate::mmu::Mmu;
 use crate::ppu::PPU;
-use crate::window::WindowDisplay;
-use crate::WindowCreator;
 
 const CLOCK_SPEED: u64 = 4_194_304;
 const DIV_RATE: u64 = 16384;
@@ -24,20 +18,15 @@ pub struct Emulator<'a> {
     ppu: PPU<'a>,
     mmu: Mmu,
     apu: AudioDevice<APU>,
-    event_pump: sdl2::EventPump,
-    background: Option<BackgroundDisplay>,
-    window: Option<WindowDisplay>,
+    event_queue: Box<dyn EventQueue>,
 }
 
 impl<'a> Emulator<'a> {
     pub fn new(
-        canvas: &'a mut Canvas<Window>,
-        texture: sdl2::render::Texture<'a>,
+        renderer: impl Renderer + 'a,
         mmu: Mmu,
         audio_context: &'a sdl2::AudioSubsystem,
-        event_pump: EventPump,
-        background_window_creator: Option<WindowCreator>,
-        window_canvas: Option<Canvas<Window>>,
+        event_queue: impl EventQueue + 'static,
     ) -> Result<Self, String> {
         let desired_audio_spec = AudioSpecDesired {
             freq: Some(44100),
@@ -48,12 +37,10 @@ impl<'a> Emulator<'a> {
             .open_playback(None, &desired_audio_spec, move |spec| APU::new(spec.freq))?;
         Ok(Self {
             cpu: Cpu::default(),
-            ppu: PPU::new(canvas, texture)?,
+            ppu: PPU::new(renderer)?,
             mmu,
             apu: audio_device,
-            event_pump,
-            background: background_window_creator.map(BackgroundDisplay::new),
-            window: window_canvas.map(WindowDisplay::new),
+            event_queue: Box::new(event_queue),
         })
     }
 
@@ -89,24 +76,15 @@ impl<'a> Emulator<'a> {
                 // Only check for SDL events if the PPU rendered a frame
                 new_frame = true;
                 first_frame_rendered = true;
-                for event in self.event_pump.poll_iter() {
-                    match event {
-                        Event::Quit { .. }
-                        | Event::KeyDown {
-                            keycode: Some(Keycode::Escape),
-                            ..
-                        } => break 'running,
-                        Event::KeyDown { .. } | Event::KeyUp { .. } => {
-                            self.mmu.input.handle_event(&event);
+
+                for event in self.event_queue.poll() {
+                    match event.to_key_event() {
+                        KeyEvent::Pressed(Some(Button::Quit)) => break 'running,
+                        KeyEvent::Pressed(..) | KeyEvent::Released(..) => {
+                            self.mmu.input.handle_event(event.as_ref());
                         }
                         _ => {}
                     }
-                }
-                if let Some(background) = &mut self.background {
-                    background.draw_tiles(&self.mmu)?;
-                }
-                if let Some(window) = &mut self.window {
-                    window.draw_tiles(&self.mmu)?;
                 }
                 let frame_elapsed = frame_time.elapsed();
                 if frame_elapsed < Duration::from_micros(FRAME_DURATION) {
