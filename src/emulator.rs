@@ -13,10 +13,10 @@ use crate::ppu::PPU;
 use crate::web::setup_web_keyboard_listener;
 
 #[cfg(feature = "wasm")]
-use web_sys::{console, js_sys};
+use web_sys::{console, js_sys, window};
 
 const CLOCK_SPEED: u64 = 4_194_304;
-const DIV_RATE: u64 = 16384;
+const DIV_RATE: f64 = 16384.0;
 const FRAME_DURATION: u64 = 16_743;
 
 pub struct Emulator<'a> {
@@ -179,6 +179,11 @@ impl<'a> Emulator<'a> {
     #[cfg(feature = "wasm")]
     pub fn run_frame_wasm(&mut self) -> Result<(), CrossPlatformError> {
         let mut timer_cycle_count = 0;
+        let performance = window()
+            .expect("Window should be available")
+            .performance()
+            .expect("Performance should be available");
+        let mut now = performance.now();
 
         let mut cycles = 0;
         while !self.ppu.render(&mut self.mmu, cycles as i32)? {
@@ -189,6 +194,14 @@ impl<'a> Emulator<'a> {
                 cycles = self.cpu.execute(&mut self.mmu);
             } else {
                 cycles = 4;
+            }
+
+            let mut time_elapsed = performance.now() - now;
+            while time_elapsed > 1000.0 / DIV_RATE {
+                self.mmu.inc_div();
+                // self.apu.lock().inc_div_apu(&self.mmu);
+                time_elapsed -= 1000.0 / DIV_RATE;
+                now = performance.now();
             }
 
             let tac = self.mmu.get(0xFF07);
