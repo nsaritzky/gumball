@@ -168,9 +168,6 @@ pub fn setup_context(window: Window) -> Result<CanvasRenderingContext2d, JsValue
         .expect("Could not get 2d context")
         .dyn_into::<CanvasRenderingContext2d>()?;
 
-    // Store context for later use
-    // You might want to use a static mut or other method to store this globally
-
     Ok(context)
 }
 
@@ -186,21 +183,37 @@ pub fn load_rom_and_run(rom: Vec<u8>) {
     let f = Rc::new(RefCell::new(None));
     let g = f.clone();
 
+    let window = window().expect("Could not get window object");
+    let performance = window
+        .performance()
+        .expect("Could not get performance object");
+
+    let mut last_frame_time = performance.now();
+    let frame_interval = 1000.0 / 60.0;
+
     *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-        EMULATOR.with(|emulator| {
-            if let Some(emulator) = emulator.borrow_mut().as_mut() {
-                emulator.run_frame_wasm();
-            }
-        });
-        request_animation_frame(f.borrow().as_ref().unwrap(), &window().unwrap());
+        let current_time = performance.now();
+        let elapsed_time = current_time - last_frame_time;
+
+        if elapsed_time >= frame_interval {
+            EMULATOR.with(|emulator| {
+                if let Some(emulator) = emulator.borrow_mut().as_mut() {
+                    emulator.run_frame_wasm();
+                }
+            });
+
+            last_frame_time = current_time - (elapsed_time % frame_interval);
+        }
+        request_animation_frame(f.borrow().as_ref().unwrap());
     }) as Box<dyn FnMut()>));
 
-    request_animation_frame(g.borrow().as_ref().unwrap(), &window().unwrap());
+    request_animation_frame(g.borrow().as_ref().unwrap());
 }
 
 #[cfg(feature = "wasm")]
-fn request_animation_frame(f: &Closure<dyn FnMut()>, window: &Window) {
-    window
+fn request_animation_frame(f: &Closure<dyn FnMut()>) {
+    window()
+        .expect("Could not get window object")
         .request_animation_frame(f.as_ref().unchecked_ref())
         .expect("Could not request animation frame");
 }
