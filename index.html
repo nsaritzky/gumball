@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Your WASM Project</title>
+    <link href="./output.css" rel="stylesheet" />
+  </head>
+  <body>
+    <script type="module">
+      import init, {
+        wasm_main,
+        setup_web_keyboard_listener,
+        load_rom_and_run,
+      } from "./pkg/gumball.js";
+      const handleRomUpload = (event) => {
+        const file = event.target.files[0];
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+          const buffer = event.target.result;
+          await load_rom_and_run(new Uint8Array(buffer));
+        };
+        reader.readAsArrayBuffer(file);
+      };
+
+      async function run() {
+        await init();
+        wasm_main();
+        setup_web_keyboard_listener();
+      }
+      document
+        .getElementById("rom-file")
+        .addEventListener("change", handleRomUpload, false);
+      run();
+    </script>
+    <div class="flex w-full justify-center">
+      <canvas class="w-1/2" id="game-canvas"> </canvas>
+    </div>
+    <input type="file" id="rom-file" accept=".gb" />
+  </body>
+</html>

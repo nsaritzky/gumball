@@ -1466,7 +1466,7 @@ impl Cpu {
         clock_cycles * 4
     }
 
-    pub fn handle_interrupt(&mut self, mem: &mut Mmu, interrupt: &Interrupt) {
+    fn handle_interrupt(&mut self, mem: &mut Mmu, interrupt: &Interrupt) {
         interrupt.clear(mem);
         self.ime = false;
         self.sp -= 2;
@@ -1657,78 +1657,6 @@ fn execute_prefix_cb(state: &mut Cpu, mem: &mut Mmu) -> u64 {
         2
     }
 }
-
-// pub fn run_cpu(mem: &mut Mmu, target_cycles: usize) -> u64 {
-//     let mut state: Cpu = Default::default();
-
-//     let mut now = Instant::now();
-//     let mut total_cycles = 0u64;
-//     let mut timer_cycle_count = 0;
-//     while state.clock_cycles < target_cycles {
-//         for interrupt in get_interrupts(mem[0xFF0F]) {
-//             state.halted = false;
-//             if state.ime && interrupt.enabled(mem) {
-//                 interrupt.handle(&mut state, mem);
-//             }
-//         }
-//         // println!("A: {:02X} F: {:02X} B: {:02X} C: {:02X} D: {:02X} E: {:02X} H: {:02X} L: {:02X} SP: {:04X} PC: 00:{:04X} ({:02X} {:02X} {:02X} {:02X})", state.registers.a, state.get_f_register(), state.registers.b, state.registers.c, state.registers.d, state.registers.e, state.registers.h, state.registers.l, state.sp, state.pc, mem[state.pc], mem[state.pc + 1], mem[state.pc + 2], mem[state.pc + 3]);
-
-//         if !state.stopped && !state.halted {
-//             execute(&mut state, mem);
-//         } else {
-//             state.clock_cycles += 1;
-//         }
-
-//         let time_elapsed = now.elapsed();
-//         now = Instant::now();
-//         let cycles_elapsed = state.clock_cycles as u64 - total_cycles;
-//         if Duration::from_nanos(cycles_elapsed * 1_000_000_000 / CLOCK_SPEED) > time_elapsed {
-//             ::std::thread::sleep(Duration::from_nanos(
-//                 cycles_elapsed * 1_000_000_000 / CLOCK_SPEED - time_elapsed.as_nanos() as u64,
-//             ));
-//         } else {
-//         }
-//         if time_elapsed > Duration::from_nanos(1_000_000_000 / DIV_RATE) {
-//             mem.inc_div();
-//         }
-
-//         let tac = mem[0xFF07];
-//         let timer_enable = (tac & 0b00000100) >> 2 == 1;
-//         let timer_cycles = match tac & 0b00000011 {
-//             0 => 256,
-//             1 => 4,
-//             2 => 16,
-//             3 => 64,
-//             n => panic!("Invalid clock select {n}"),
-//         };
-
-//         if timer_enable {
-//             timer_cycle_count += cycles_elapsed;
-//             while timer_cycle_count >= timer_cycles {
-//                 timer_cycle_count -= timer_cycles;
-//                 let (incremented, overflowed) = mem.get(0xFF05).overflowing_add(1);
-//                 if overflowed {
-//                     mem.set(0xFF05, mem[0xFF06]);
-//                     Interrupt::Timer.trigger(mem);
-//                 } else {
-//                     mem.set(0xFF05, incremented);
-//                 }
-//             }
-//         }
-//         total_cycles = state.clock_cycles as u64;
-
-//         if mem[0xFF01] != 0 {
-//             print!("{}", mem[0xFF01] as char);
-//             mem[0xFF01] = 0;
-//         }
-
-//         if state.ime_delay {
-//             state.ime = true;
-//             state.ime_delay = false;
-//         }
-//     }
-//     state.clock_cycles = 0;
-// }
 
 #[cfg(test)]
 mod tests {

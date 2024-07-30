@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::input::Button;
-use crate::media::{Event, EventQueue, KeyEvent, Renderer};
+use crate::media::{CrossPlatformError, Event, EventQueue, KeyEvent, Renderer};
 use sdl2::event::Event as SdlEvent;
 use sdl2::keyboard::Keycode;
 use sdl2::render::{Canvas as SdlCanvas, Texture};
@@ -54,11 +54,14 @@ impl EventQueue for sdl2::EventPump {
 pub struct SdlRenderer<'a>(pub Texture<'a>, pub Rc<RefCell<SdlCanvas<Window>>>);
 
 impl<'a> Renderer for SdlRenderer<'a> {
-    fn render(&mut self, buffer: &[u8]) -> Result<(), String> {
+    fn render(&mut self, buffer: &[u8]) -> Result<(), CrossPlatformError> {
         self.0
             .update(None, buffer, 160 * 3)
-            .map_err(|e| e.to_string())?;
-        self.1.borrow_mut().copy(&self.0, None, None)?;
+            .map_err(|e| CrossPlatformError::NativeError(e.to_string()))?;
+        self.1
+            .borrow_mut()
+            .copy(&self.0, None, None)
+            .map_err(CrossPlatformError::NativeError)?;
         self.1.borrow_mut().present();
         Ok(())
     }

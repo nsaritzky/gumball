@@ -1,10 +1,10 @@
-use sdl2::pixels::Color;
 use std::cmp::max;
 use std::collections::VecDeque;
-use std::time::Instant;
+#[cfg(feature = "wasm")]
+use web_sys::console;
 
 use crate::interrupts::Interrupt;
-use crate::media::Renderer;
+use crate::media::{CrossPlatformError, Renderer};
 use crate::mmu::Mmu;
 use crate::registers::*;
 
@@ -14,11 +14,34 @@ const CLOCK_SPEED: u32 = 4_194_304;
 const FRAME_DURATION: u32 = 16_743;
 const PIXEL_BUFFER_SIZE: usize = 176 * 176 * 3;
 
+#[derive(Debug, Copy, Clone)]
+struct Color {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
 const PALETTE: [Color; 4] = [
-    Color::RGB(0x8c, 0xb5, 0x28),
-    Color::RGB(0x6c, 0x94, 0x21),
-    Color::RGB(0x42, 0x6b, 0x29),
-    Color::RGB(0x21, 0x42, 0x31),
+    Color {
+        r: 0x8c,
+        g: 0xb5,
+        b: 0x28,
+    },
+    Color {
+        r: 0x6c,
+        g: 0x94,
+        b: 0x21,
+    },
+    Color {
+        r: 0x42,
+        g: 0x6b,
+        b: 0x29,
+    },
+    Color {
+        r: 0x21,
+        g: 0x42,
+        b: 0x31,
+    },
 ];
 
 // Get the value of a bit in a number
@@ -80,7 +103,6 @@ pub struct PPU<'a> {
     sprite_buffer: Vec<OAM>,
     mode: PPUMode,
     clock_cycles: u32,
-    start_time: Instant,
     pixel_buffer: [u8; PIXEL_BUFFER_SIZE],
     lx: u8,
     window_counter: u8,
@@ -91,14 +113,13 @@ pub struct PPU<'a> {
 }
 
 impl<'a> PPU<'a> {
-    pub fn new(renderer: impl Renderer + 'a) -> Result<Self, String> {
-        Ok(PPU {
+    pub fn new(renderer: impl Renderer + 'a) -> Self {
+        PPU {
             bg_fifo: VecDeque::new(),
             sprite_fifo: VecDeque::new(),
             sprite_buffer: Vec::new(),
             mode: PPUMode::OAMSearch,
             clock_cycles: 0,
-            start_time: Instant::now(),
             pixel_buffer: [0; PIXEL_BUFFER_SIZE],
             lx: 0,
             window_counter: 0,
@@ -106,11 +127,11 @@ impl<'a> PPU<'a> {
             renderer: Box::new(renderer),
             cycle_counter: 0,
             mode3_extra_cycles: 0,
-        })
+        }
     }
 
     // Return true if a frame has been rendered
-    pub fn render(&mut self, mem: &mut Mmu, cycles: i32) -> Result<bool, String> {
+    pub fn render(&mut self, mem: &mut Mmu, cycles: i32) -> Result<bool, CrossPlatformError> {
         self.cycle_counter += cycles;
         PPU::stat_interrupt(mem);
         match self.mode {
@@ -330,7 +351,7 @@ impl<'a> PPU<'a> {
         }
     }
 
-    fn draw_pixel(&mut self, mem: &Mmu, tile_offset: u32) -> Result<i32, String> {
+    fn draw_pixel(&mut self, mem: &Mmu, tile_offset: u32) -> Result<i32, CrossPlatformError> {
         let window_active =
             get_bit(mem.get(LCDC), 5) != 0 && mem.get(WX) <= self.lx && mem.get(LY) >= mem.get(WY);
         let mut clock_cycles: i32 = 0;
@@ -370,7 +391,7 @@ impl<'a> PPU<'a> {
         Ok(clock_cycles)
     }
 
-    pub fn draw_line(&mut self, mem: &Mmu) -> Result<i32, String> {
+    pub fn draw_line(&mut self, mem: &Mmu) -> Result<i32, CrossPlatformError> {
         self.bg_fifo.clear();
         self.sprite_fifo.clear();
         self.lx = 0;
@@ -386,7 +407,7 @@ impl<'a> PPU<'a> {
         Ok(clock_cycles)
     }
 
-    fn render_pixel(&mut self, mem: &Mmu, pixel: Pixel) -> Result<(), String> {
+    fn render_pixel(&mut self, mem: &Mmu, pixel: Pixel) -> Result<(), CrossPlatformError> {
         if self.lx >= 8 && mem.get(LY) < 144 {
             let palette = match pixel.palette {
                 Palette::BGP => mem.get(BGP),

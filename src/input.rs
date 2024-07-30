@@ -1,5 +1,8 @@
 use crate::media::{Event, KeyEvent};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
+#[derive(Debug, Clone, Copy)]
 pub enum Button {
     A,
     B,
@@ -13,6 +16,7 @@ pub enum Button {
 }
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
 pub struct Input {
     select_button_keys: bool,
     select_direction_keys: bool,
@@ -123,13 +127,13 @@ impl Input {
 
     pub fn handle_event(&mut self, event: &dyn Event) {
         match event.to_key_event() {
-            KeyEvent::Pressed(optBtn) => {
-                if let Some(button) = optBtn {
+            KeyEvent::Pressed(opt_btn) => {
+                if let Some(button) = opt_btn {
                     self.press_button(button);
                 }
             }
-            KeyEvent::Released(optBtn) => {
-                if let Some(button) = optBtn {
+            KeyEvent::Released(opt_btn) => {
+                if let Some(button) = opt_btn {
                     self.release_button(button);
                 }
             }

@@ -85,8 +85,4 @@ impl Interrupt {
         if_ |= 1 << self.priority();
         mem.set(0xFF0F, if_);
     }
-
-    pub fn handle(&self, cpu: &mut Cpu, mem: &mut Mmu) {
-        cpu.handle_interrupt(mem, self);
-    }
 }

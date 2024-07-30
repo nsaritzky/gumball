@@ -1,5 +1,16 @@
+use thiserror::Error;
+
 use crate::input::Button;
 
+#[derive(Error, Debug)]
+pub enum CrossPlatformError {
+    #[error("Native error: {0}")]
+    NativeError(String),
+    #[error("Js error: {0}")]
+    JsError(String),
+}
+
+#[derive(Debug)]
 pub enum KeyEvent {
     Pressed(Option<Button>),
     Released(Option<Button>),
@@ -7,7 +18,7 @@ pub enum KeyEvent {
 }
 
 pub trait Renderer {
-    fn render(&mut self, pixel_buffer: &[u8]) -> Result<(), String>;
+    fn render(&mut self, pixel_buffer: &[u8]) -> Result<(), CrossPlatformError>;
 }
 
 pub trait Event {
