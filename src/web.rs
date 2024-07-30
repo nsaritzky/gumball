@@ -91,7 +91,20 @@ where
     let document = window.document().expect("Could not get document object");
 
     let closure = Closure::wrap(Box::new(move |event: KeyboardEvent| {
-        event.prevent_default();
+        let keys = [
+            "Escape",
+            "z",
+            "x",
+            "Enter",
+            "Backspace",
+            "ArrowUp",
+            "ArrowDown",
+            "ArrowRight",
+            "ArrowLeft",
+        ];
+        if keys.contains(&event.key().as_str()) {
+            event.prevent_default();
+        }
         EMULATOR.with(|emulator| {
             if let Some(emulator) = emulator.borrow_mut().as_mut() {
                 emulator.handle_event(&event);
